@@ -1,0 +1,10 @@
+# C build artifacts
+backend/src/*.o
+backend/stock-backend.exe
+
+# Java build artifacts
+frontend/target/
+
+# API keys
+*.env
+.env

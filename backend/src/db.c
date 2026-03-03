@@ -33,11 +33,11 @@ static int exec_sql(const char *sql)
 
 /* Run a parameterised query; caller must PQclear the result. */
 static PGresult *exec_params(const char *sql,
-                             int nparams,
+                int nparams,
                              const char *const *vals)
 {
     PGresult *res = PQexecParams(g_conn, sql, nparams,
-                                 NULL, vals, NULL, NULL, 0);
+                    NULL, vals, NULL, NULL, 0);
     ExecStatusType st = PQresultStatus(res);
     if (st != PGRES_COMMAND_OK && st != PGRES_TUPLES_OK)
     {

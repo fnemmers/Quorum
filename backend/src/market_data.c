@@ -1,5 +1,4 @@
-#include "market_data.h"
-#include "db.h"
+#include market_data.h
 #include <string.h>
 #include <stdio.h>
 
@@ -9,6 +8,7 @@ void market_data_init(void) {
     memset(&g_state, 0, sizeof(g_state));
     pthread_mutex_init(&g_state.lock, NULL);
     g_state.next_alert_id = 1;
+    /* pre-fill client fds with -1 so we can detect empty slots */
     for (int i = 0; i < MAX_CLIENTS; i++) g_state.client_fds[i] = -1;
 }
 
@@ -31,14 +31,14 @@ int market_get_or_add_symbol(const char *symbol) {
 }
 
 void market_update_quote(const char *symbol, double price,
-                         double bid, double ask,
-                         int64_t volume, int64_t ts) {
+    double bid, double ask,
+    int64_t volume, int64_t ts) {
     pthread_mutex_lock(&g_state.lock);
 
     int idx = market_get_or_add_symbol(symbol);
     if (idx < 0) { pthread_mutex_unlock(&g_state.lock); return; }
 
-    Quote *q     = &g_state.quotes[idx];
+    Quote *q   = &g_state.quotes[idx];
     strncpy(q->symbol, symbol, MAX_SYMBOL_LEN - 1);
     q->price     = price;
     q->bid       = bid;
@@ -60,6 +60,7 @@ void market_update_quote(const char *symbol, double price,
 void market_portfolio_add(const char *symbol, double shares, double price) {
     pthread_mutex_lock(&g_state.lock);
 
+    /* check if holding already exists → update avg */
     for (int i = 0; i < g_state.holding_count; i++) {
         if (strcmp(g_state.holdings[i].symbol, symbol) == 0) {
             Holding *h   = &g_state.holdings[i];
@@ -67,8 +68,6 @@ void market_portfolio_add(const char *symbol, double shares, double price) {
             h->shares   += shares;
             h->avg_price = (h->shares > 0) ? total / h->shares : 0.0;
             pthread_mutex_unlock(&g_state.lock);
-            /* persist updated position */
-            db_portfolio_save(symbol, h->shares, h->avg_price);
             return;
         }
     }
@@ -78,10 +77,6 @@ void market_portfolio_add(const char *symbol, double shares, double price) {
         strncpy(h->symbol, symbol, MAX_SYMBOL_LEN - 1);
         h->shares    = shares;
         h->avg_price = price;
-        pthread_mutex_unlock(&g_state.lock);
-        /* persist new position */
-        db_portfolio_save(symbol, shares, price);
-        return;
     }
 
     pthread_mutex_unlock(&g_state.lock);
@@ -97,7 +92,6 @@ void market_portfolio_remove(const char *symbol) {
         }
     }
     pthread_mutex_unlock(&g_state.lock);
-    db_portfolio_delete(symbol);
 }
 
 int market_alert_add(const char *symbol, AlertType type, double trigger) {
@@ -114,8 +108,6 @@ int market_alert_add(const char *symbol, AlertType type, double trigger) {
     a->active        = 1;
     int id = a->id;
     pthread_mutex_unlock(&g_state.lock);
-    /* persist */
-    db_alert_save(id, symbol, type, trigger);
     return id;
 }
 
@@ -129,5 +121,4 @@ void market_alert_remove(int id) {
         }
     }
     pthread_mutex_unlock(&g_state.lock);
-    db_alert_delete(id);
 }

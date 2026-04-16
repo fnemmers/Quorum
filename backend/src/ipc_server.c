@@ -1,4 +1,5 @@
 #include "ipc_server.h"
+#include "ipc_research.h"
 #include "market_data.h"
 #include "polygon_ws.h"
 #include "polygon_rest.h"
@@ -293,6 +294,17 @@ static void *client_thread_fn(void *arg) {
                 else if (!strcmp(cmd, "alert_add"))       cmd_alert_add(fd, root);
                 else if (!strcmp(cmd, "alert_remove"))    cmd_alert_remove(fd, root);
                 else if (!strcmp(cmd, "alert_list"))      cmd_alert_list(fd);
+                else {
+                    /* Hand off to the research module (bots, aggregation,
+                     * backtest). It returns 1 if it handled the command. */
+                    if (!ipc_research_dispatch((int)fd, cmd, root)) {
+                        char err[128];
+                        snprintf(err, sizeof(err),
+                            "{\"type\":\"error\",\"message\":\"unknown cmd: %.40s\"}\n",
+                            cmd);
+                        client_send(fd, err);
+                    }
+                }
             }
             cJSON_Delete(root);
         } else {

@@ -4,7 +4,12 @@
 #include <stdint.h>
 #include <pthread.h>
 
-#define MAX_SYMBOLS     64
+/* Bumped from 64 to accommodate the S&P 500 universe used by the bot
+ * ensemble. The MarketState arrays sized by MAX_SYMBOLS now allocate
+ * ~6 MB for the price-history ring buffers — fine on a desktop. If this
+ * becomes a problem, move the ring buffers to a heap allocation indexed
+ * by symbol id, or shrink PRICE_HISTORY. */
+#define MAX_SYMBOLS     600
 #define MAX_SYMBOL_LEN  16
 #define PRICE_HISTORY   1000   /* ring-buffer size per symbol */
 #define MAX_CLIENTS     16

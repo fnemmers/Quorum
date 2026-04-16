@@ -21,6 +21,14 @@ int db_init(const char *path);
 /* Close the database. Call at shutdown. */
 void db_close(void);
 
+/* Forward decl so callers don't need libpq-fe.h. */
+typedef struct pg_conn PGconn;
+
+/* Returns the underlying connection (or NULL if db_init not called).
+ * Used by other persistence modules (bot_picks.c) so they can issue
+ * parameterised queries against the same connection. */
+PGconn *db_get_conn(void);
+
 /* ── Portfolio ───────────────────────────────────────────────── */
 int db_portfolio_save(const char *symbol, double shares, double avg_price);
 int db_portfolio_delete(const char *symbol);
@@ -79,6 +87,7 @@ typedef struct
     OrderStatus status;
     int64_t created_at;
     int64_t filled_at;
+    double filled_price;
 } OrderRecord;
 
 int db_order_insert(const char *symbol, OrderSide side,

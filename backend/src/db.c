@@ -8,6 +8,11 @@
 
 static PGconn *g_conn = NULL;
 
+/* Accessor for other modules (bot_picks.c) so they can use parameterised
+ * queries without each holding their own connection. Returns NULL if db_init
+ * has not been called. */
+PGconn *db_get_conn(void) { return g_conn; }
+
 /* ── Helpers ─────────────────────────────────────────────────── */
 
 static int64_t now_ms(void)
@@ -112,6 +117,52 @@ int db_init(const char *connstr)
         "  status        TEXT             NOT NULL DEFAULT 'pending',"
         "  created_at    BIGINT           NOT NULL,"
         "  filled_at     BIGINT"
+        ");");
+
+    /* ── Bot ensemble research tables ─────────────────────────── */
+
+    exec_sql(
+        "CREATE TABLE IF NOT EXISTS bot_runs ("
+        "  id              BIGSERIAL PRIMARY KEY,"
+        "  label           TEXT    NOT NULL,"
+        "  n_bots_target   INT     NOT NULL,"
+        "  n_bots_actual   INT,"
+        "  hold_days       INT     NOT NULL,"
+        "  started_at      BIGINT  NOT NULL,"
+        "  finished_at     BIGINT"
+        ");");
+
+    exec_sql(
+        "CREATE TABLE IF NOT EXISTS bot_picks ("
+        "  id          BIGSERIAL PRIMARY KEY,"
+        "  run_id      BIGINT  NOT NULL REFERENCES bot_runs(id) ON DELETE CASCADE,"
+        "  bot_index   INT     NOT NULL,"
+        "  persona     TEXT    NOT NULL,"
+        "  symbol      TEXT    NOT NULL,"
+        "  created_at  BIGINT  NOT NULL"
+        ");");
+
+    exec_sql(
+        "CREATE INDEX IF NOT EXISTS idx_bot_picks_run "
+        "ON bot_picks (run_id);");
+
+    exec_sql(
+        "CREATE TABLE IF NOT EXISTS backtest_results ("
+        "  id            BIGSERIAL PRIMARY KEY,"
+        "  run_id        BIGINT  NOT NULL REFERENCES bot_runs(id) ON DELETE CASCADE,"
+        "  start_date    TEXT    NOT NULL,"
+        "  end_date      TEXT    NOT NULL,"
+        "  hold_days     INT     NOT NULL,"
+        "  n_used        INT     NOT NULL,"
+        "  n_skipped     INT     NOT NULL,"
+        "  port_return   DOUBLE PRECISION NOT NULL,"
+        "  bench_return  DOUBLE PRECISION NOT NULL,"
+        "  alpha         DOUBLE PRECISION NOT NULL,"
+        "  sharpe        DOUBLE PRECISION NOT NULL,"
+        "  max_dd        DOUBLE PRECISION NOT NULL,"
+        "  hit_rate      DOUBLE PRECISION NOT NULL,"
+        "  txn_cost      DOUBLE PRECISION NOT NULL,"
+        "  created_at    BIGINT  NOT NULL"
         ");");
 
     printf("[DB] Schema ready\n");

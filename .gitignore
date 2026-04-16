@@ -5,6 +5,12 @@ backend/stock-backend.exe
 # Java build artifacts
 frontend/target/
 
+# Python venv
+bots/venv/
+
+# Persistent budget ledger
+bots/budget.json
+
 # API keys
 *.env
 .env

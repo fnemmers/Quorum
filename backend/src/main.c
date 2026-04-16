@@ -14,8 +14,10 @@
 
 #include "market_data.h"
 #include "ipc_server.h"
+#include "ipc_research.h"
 #include "polygon_ws.h"
 #include "polygon_rest.h"
+#include "db.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,6 +50,22 @@ int main(int argc, char *argv[]) {
     market_data_init();
     polygon_rest_init(api_key);
 
+    /* Connect to Postgres. The connection string can be overridden via
+     * the PG_CONNSTR env var; defaults to a local dev DB. The schema
+     * (including the new bot_runs/bot_picks/backtest_results tables) is
+     * created on first run. */
+    {
+        const char *connstr = getenv("PG_CONNSTR");
+        if (!connstr || !*connstr)
+            connstr = "host=localhost dbname=stockapp user=postgres";
+        if (db_init(connstr) != 0) {
+            fprintf(stderr, "[MAIN] db_init failed — research IPC commands "
+                            "will not work. Continuing anyway.\n");
+        }
+    }
+
+    ipc_research_init();
+
     if (ipc_server_start() != 0) {
         fprintf(stderr, "[MAIN] Failed to start IPC server\n");
         return 1;
@@ -71,6 +89,8 @@ int main(int argc, char *argv[]) {
     printf("[MAIN] Shutting down...\n");
     polygon_ws_stop();
     ipc_server_stop();
+    ipc_research_cleanup();
     polygon_rest_cleanup();
+    db_close();
     return 0;
 }

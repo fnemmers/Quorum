@@ -1,12 +1,21 @@
 # C build artifacts
 backend/src/*.o
 backend/stock-backend.exe
+backend/stock-backend
 
 # Java build artifacts
 frontend/target/
 
-# Python venv
+# Node
+node_modules/
+
+# Python
 bots/venv/
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
 
 # Persistent budget ledger
 bots/budget.json

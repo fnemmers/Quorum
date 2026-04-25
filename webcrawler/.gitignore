@@ -1,0 +1,7 @@
+crawler
+indexer
+query
+*.o
+*.out
+data/
+/tmp/crawler_ipc.sock

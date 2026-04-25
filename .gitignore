@@ -8,6 +8,7 @@ frontend/target/
 
 # Node
 node_modules/
+frontend-react/dist/
 
 # Python
 bots/venv/

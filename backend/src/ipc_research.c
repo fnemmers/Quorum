@@ -19,6 +19,7 @@
 #include "aggregation.h"
 #include "backtest.h"
 #include "sp500_universe.h"
+#include "crawler.h"
 #include "market_data.h"
 #include "cJSON.h"
 
@@ -75,6 +76,38 @@ static void cmd_sp500_list(int fd) {
 
     send_obj(fd, o);
     cJSON_Delete(o);
+}
+
+/* ── bot_runs_list ──────────────────────────────────────────────── */
+
+static void cmd_bot_runs_list(int fd, cJSON *root) {
+    cJSON *jl = cJSON_GetObjectItemCaseSensitive(root, "limit");
+    int limit = (jl && cJSON_IsNumber(jl)) ? (int)jl->valuedouble : 50;
+    if (limit <= 0 || limit > 500) limit = 50;
+
+    BotRunInfo *rows = (BotRunInfo *)calloc((size_t)limit, sizeof(BotRunInfo));
+    if (!rows) { send_error(fd, "oom"); return; }
+
+    int n = bot_runs_list(rows, limit);
+    if (n < 0) { free(rows); send_error(fd, "bot_runs_list failed"); return; }
+
+    cJSON *o   = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "type", "bot_runs_list");
+    cJSON *arr = cJSON_AddArrayToObject(o, "runs");
+    for (int i = 0; i < n; i++) {
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddNumberToObject(e, "id",            (double)rows[i].id);
+        cJSON_AddStringToObject(e, "label",         rows[i].label);
+        cJSON_AddNumberToObject(e, "n_bots_target", rows[i].n_bots_target);
+        cJSON_AddNumberToObject(e, "n_bots_actual", rows[i].n_bots_actual);
+        cJSON_AddNumberToObject(e, "hold_days",     rows[i].hold_days);
+        cJSON_AddNumberToObject(e, "started_at",    (double)rows[i].started_at);
+        cJSON_AddNumberToObject(e, "finished_at",   (double)rows[i].finished_at);
+        cJSON_AddItemToArray(arr, e);
+    }
+    send_obj(fd, o);
+    cJSON_Delete(o);
+    free(rows);
 }
 
 /* ── bot_run_create ─────────────────────────────────────────────── */
@@ -312,6 +345,48 @@ static void cmd_backtest_run(int fd, cJSON *root) {
     cJSON_Delete(o);
 }
 
+/* ── crawl_news ────────────────────────────────────────────────── */
+
+static void cmd_crawl_news(int fd, cJSON *root) {
+    cJSON *jl = cJSON_GetObjectItemCaseSensitive(root, "limit");
+    int limit = (jl && cJSON_IsNumber(jl)) ? (int)jl->valuedouble : 50;
+
+    int n = crawler_fetch_news(limit);
+    if (n < 0) {
+        send_error(fd, "crawl_news failed");
+        return;
+    }
+
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "type", "crawl_done");
+    cJSON_AddNumberToObject(o, "n_fetched", limit);
+    cJSON_AddNumberToObject(o, "n_stored", n);
+    send_obj(fd, o);
+    cJSON_Delete(o);
+}
+
+/* ── get_news_digest ───────────────────────────────────────────── */
+
+static void cmd_get_news_digest(int fd, cJSON *root) {
+    cJSON *jc = cJSON_GetObjectItemCaseSensitive(root, "max_chars");
+    cJSON *jd = cJSON_GetObjectItemCaseSensitive(root, "days");
+    int max_chars = (jc && cJSON_IsNumber(jc)) ? (int)jc->valuedouble : 32000;
+    int days      = (jd && cJSON_IsNumber(jd)) ? (int)jd->valuedouble : 7;
+
+    char *digest = crawler_build_digest(max_chars, days);
+    if (!digest) {
+        send_error(fd, "build_digest failed");
+        return;
+    }
+
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "type", "news_digest");
+    cJSON_AddStringToObject(o, "digest", digest);
+    send_obj(fd, o);
+    cJSON_Delete(o);
+    free(digest);
+}
+
 /* ── Public dispatch ────────────────────────────────────────────── */
 
 void ipc_research_init(void)    { /* no-op for now */ }
@@ -320,10 +395,13 @@ void ipc_research_cleanup(void) { /* no-op for now */ }
 int ipc_research_dispatch(int client_fd, const char *cmd, cJSON *root) {
     if (!cmd) return 0;
     if      (!strcmp(cmd, "sp500_list"))       { cmd_sp500_list(client_fd);             return 1; }
+    else if (!strcmp(cmd, "bot_runs_list"))    { cmd_bot_runs_list(client_fd, root);    return 1; }
     else if (!strcmp(cmd, "bot_run_create"))   { cmd_bot_run_create(client_fd, root);   return 1; }
     else if (!strcmp(cmd, "bot_picks_ingest")) { cmd_bot_picks_ingest(client_fd, root); return 1; }
     else if (!strcmp(cmd, "bot_run_finish"))   { cmd_bot_run_finish(client_fd, root);   return 1; }
     else if (!strcmp(cmd, "aggregate_run"))    { cmd_aggregate_run(client_fd, root);    return 1; }
     else if (!strcmp(cmd, "backtest_run"))     { cmd_backtest_run(client_fd, root);     return 1; }
+    else if (!strcmp(cmd, "crawl_news"))       { cmd_crawl_news(client_fd, root);       return 1; }
+    else if (!strcmp(cmd, "get_news_digest"))  { cmd_get_news_digest(client_fd, root);  return 1; }
     return 0;
 }

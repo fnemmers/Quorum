@@ -51,6 +51,7 @@ SRCS = src/main.c            \
        src/backtest.c        \
        src/convergence.c     \
        src/sp500_universe.c  \
+       src/crawler.c         \
        src/cJSON.c
 
 OBJS = $(SRCS:.c=.o)

@@ -1,105 +1,130 @@
 # StockApp
 
-A real-time stock market application with a **C backend** and **Java/JavaFX frontend**.
+An AI-powered stock analysis platform that combines a **C backend**, **Python bot ensemble**, **Node.js bridge**, and **React frontend** to aggregate LLM-driven stock picks, backtest them, and display results in real time.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Java (JavaFX)  ←── TCP/JSON ──►  C Backend                │
-│  • Watchlist                      • Polygon.io WebSocket    │
-│  • Candlestick chart              • Polygon.io REST         │
-│  • Portfolio tracker              • Alert engine            │
-│  • Price alerts                   • IPC server :8765        │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                                                                          │
+│  React (Vite + TS)  ◄── WS :3001 ──►  Node Bridge  ◄── TCP ──►  C Backend
+│  • Candlestick chart                   • WS↔TCP mux              • Polygon.io WS + REST
+│  • Portfolio tracker                                              • PostgreSQL persistence
+│  • Price alerts                                                   • Bot aggregation engine
+│  • Risk metrics                     Python Bots ── TCP :8765 ──► • Backtester
+│  • Trade blotter                    • 500 Claude Haiku instances  • Convergence detector
+│                                     • Budget-aware ($50/mo cap)  • S&P 500 universe
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Architecture
+
+| Layer | Language | Role |
+|---|---|---|
+| **Backend** | C | Market data (Polygon.io), PostgreSQL persistence, IPC server, bot aggregation, backtesting, convergence detection |
+| **Bots** | Python | Spawns 500 Claude Haiku instances with different investment personas to pick S&P 500 stocks |
+| **Bridge** | Node.js | WebSocket-to-TCP multiplexer so the browser can talk to the C backend |
+| **Frontend** | React + TypeScript | Real-time UI with charts, portfolio management, alerts, and risk metrics |
 
 ---
 
 ## Requirements
 
 ### C Backend
-| Dependency | Install (MSYS2/MinGW) | Install (Ubuntu/Debian) |
+| Dependency | macOS (Homebrew) | Ubuntu/Debian |
 |---|---|---|
-| GCC ≥ 11 | `pacman -S mingw-w64-x86_64-gcc` | `apt install gcc` |
-| OpenSSL | `pacman -S mingw-w64-x86_64-openssl` | `apt install libssl-dev` |
-| libcurl | `pacman -S mingw-w64-x86_64-curl` | `apt install libcurl4-openssl-dev` |
-| pthreads | included in MinGW | included in glibc |
-| **cJSON** | [download manually](#cjson) | [download manually](#cjson) |
+| GCC >= 11 | `brew install gcc` | `apt install gcc` |
+| OpenSSL | `brew install openssl` | `apt install libssl-dev` |
+| libcurl | `brew install curl` | `apt install libcurl4-openssl-dev` |
+| PostgreSQL (libpq) | `brew install postgresql@17` | `apt install libpq-dev` |
+| pthreads | included | included |
 
-### Java Frontend
+### Python Bots
 | Requirement | Version |
 |---|---|
-| JDK | 21+ |
-| Maven | 3.9+ |
+| Python | 3.11+ |
+| anthropic SDK | see `bots/requirements.txt` |
+
+### Node Bridge
+| Requirement | Version |
+|---|---|
+| Node.js | 18+ |
+| ws | see `bridge/node_modules/` |
+
+### React Frontend
+| Requirement | Version |
+|---|---|
+| Node.js | 18+ |
+| npm | 9+ |
 
 ---
 
 ## Setup
 
-### 1. Get a Polygon.io API key
-Sign up at **https://polygon.io** – the free tier provides 15-minute delayed data.
+### 1. Get API Keys
 
-### 2. Download cJSON  <a id="cjson"></a>
+- **Polygon.io** — Sign up at [polygon.io](https://polygon.io). The free tier provides 15-minute delayed data.
+- **Anthropic** — Get a Claude API key for the bot ensemble.
+
+### 2. Download cJSON
+
 ```bash
-# from the backend/src/ directory:
+cd backend/src/
 curl -LO https://raw.githubusercontent.com/DaveGamble/cJSON/master/cJSON.h
 curl -LO https://raw.githubusercontent.com/DaveGamble/cJSON/master/cJSON.c
 ```
 
-Or download the `.zip` from https://github.com/DaveGamble/cJSON/releases and copy
-`cJSON.h` and `cJSON.c` into `backend/src/`.
+### 3. Set Up PostgreSQL
+
+Create a database for the backend. The C backend will auto-create tables (`portfolio`, `alerts`, `price_cache`, `order_history`, `bot_runs`, `bot_picks`, `backtest_results`) on first connection.
+
+### 4. Install Dependencies
+
+```bash
+# Frontend
+cd frontend-react && npm install
+
+# Bridge
+cd bridge && npm install
+
+# Bots
+cd bots && pip install -r requirements.txt
+```
 
 ---
 
-## Build
+## Build & Run
 
 ### C Backend
-
-**MSYS2 / MinGW on Windows:**
 ```bash
-cd stock-app/backend
-# Ensure cJSON.h and cJSON.c are in src/
+cd backend
 make
-# Produces: stock-backend.exe
+# Produces: stock-backend (macOS/Linux) or stock-backend.exe (Windows)
+
+./stock-backend YOUR_POLYGON_API_KEY
+# Starts IPC server on port 8765
 ```
 
-**Linux / macOS:**
+### Node Bridge
 ```bash
-cd stock-app/backend
-make
-# Produces: stock-backend
+cd bridge
+node bridge.js
+# Connects to backend on :8765, serves WebSocket on :3001
 ```
 
-### Java Frontend
+### React Frontend
 ```bash
-cd stock-app/frontend
-mvn package -DskipTests
-# Produces: target/stockapp-frontend-1.0.0.jar
+cd frontend-react
+npm run dev
+# Vite dev server, connects to bridge on :3001
 ```
 
----
-
-## Run
-
-### Option A – Java launches C automatically
-Put `stock-backend.exe` (or `stock-backend`) in the same directory as the JAR,
-or set `STOCK_BACKEND_BIN=/path/to/stock-backend`.
-
+### Python Bots
 ```bash
-# Windows (PowerShell / cmd)
-set POLYGON_API_KEY=YOUR_KEY_HERE
-java -jar target/stockapp-frontend-1.0.0.jar
-
-# Linux / macOS
-POLYGON_API_KEY=YOUR_KEY_HERE java -jar target/stockapp-frontend-1.0.0.jar
-```
-
-### Option B – Start them separately
-```bash
-# Terminal 1 – backend
-./backend/stock-backend YOUR_POLYGON_API_KEY
-
-# Terminal 2 – frontend
-java -jar frontend/target/stockapp-frontend-1.0.0.jar
+cd bots
+python bot_runner.py
+# Spawns 500 Claude Haiku bots, sends picks to backend via TCP :8765
 ```
 
 ---
@@ -111,80 +136,95 @@ stock-app/
 ├── backend/
 │   ├── Makefile
 │   └── src/
-│       ├── main.c            Entry point
-│       ├── market_data.h/c   Shared state, thread-safe ring-buffers
-│       ├── polygon_ws.h/c    WebSocket client → Polygon.io (OpenSSL)
-│       ├── polygon_rest.h/c  REST client → Polygon.io (libcurl)
-│       ├── ipc_server.h/c    Local TCP server on :8765, command dispatcher
-│       └── cJSON.h/c         JSON parsing (download separately)
-└── frontend/
-    ├── pom.xml
-    └── src/main/java/com/stockapp/
-        ├── Main.java                     App entry point, launches backend
-        ├── backend/
-        │   └── BackendClient.java        TCP client + event dispatcher
-        ├── model/
-        │   ├── StockQuote.java           JavaFX observable quote
-        │   ├── OHLCBar.java              Candlestick bar
-        │   ├── Holding.java              Portfolio position + P&L
-        │   └── AlertModel.java           Price alert record
-        └── ui/
-            ├── QuoteView.java            Watchlist + candlestick chart tab
-            ├── CandlestickChart.java     Canvas-based OHLCV chart
-            ├── PortfolioView.java        Portfolio tab
-            └── AlertView.java           Alerts tab + notification popup
+│       ├── main.c              Entry point, initializes all subsystems
+│       ├── market_data.c/h     Global price state, thread-safe ring buffers
+│       ├── polygon_ws.c/h      WebSocket client for Polygon.io real-time feed
+│       ├── polygon_rest.c/h    REST client for Polygon.io historical data
+│       ├── ipc_server.c/h      TCP server (:8765), command dispatcher
+│       ├── ipc_research.c/h    Bot ensemble & backtest command handlers
+│       ├── db.c/h              PostgreSQL persistence layer
+│       ├── bot_picks.c/h       Bot run & pick storage
+│       ├── aggregation.c/h     Cross-bot ticker aggregation (top-K picks)
+│       ├── backtest.c/h        Portfolio backtester (Sharpe, drawdown, hit rate)
+│       ├── convergence.c/h     Ensemble stability detection (Jaccard similarity)
+│       ├── sp500_universe.c/h  S&P 500 ticker universe
+│       └── cJSON.c/h           Vendored JSON parser
+├── bots/
+│   ├── bot_runner.py           Orchestrator: 500 Claude Haiku stock pickers
+│   ├── backfill.py             Primes price_cache with historical OHLCV data
+│   ├── budget.py               Monthly API spend tracker ($50/mo cap)
+│   └── requirements.txt
+├── bridge/
+│   └── bridge.js               WebSocket ↔ TCP multiplexer
+├── frontend-react/
+│   ├── src/
+│   │   ├── App.tsx
+│   │   └── components/
+│   │       ├── Chart.tsx           Candlestick chart (lightweight-charts)
+│   │       ├── QuotePanel.tsx      Real-time price ticker
+│   │       ├── PortfolioPanel.tsx  Holdings management
+│   │       ├── AlertPanel.tsx      Price alert CRUD
+│   │       ├── RiskPanel.tsx       Risk/performance metrics
+│   │       ├── TradeBlotter.tsx    Order history log
+│   │       └── StatusBar.tsx       Connection status indicator
+│   ├── package.json
+│   ├── tailwind.config.js
+│   └── vite.config.ts
+└── frontend/                   Legacy Java/JavaFX frontend (archived)
 ```
 
 ---
 
-## IPC Protocol (localhost:8765)
+## IPC Protocol (TCP :8765)
 
 The C backend speaks **newline-delimited JSON** over TCP.
 
-### Java → C (commands)
+### Client → Backend (commands)
 ```json
-{"cmd":"subscribe",   "symbol":"AAPL"}
-{"cmd":"unsubscribe", "symbol":"AAPL"}
-{"cmd":"history",     "symbol":"AAPL","multiplier":1,"timespan":"day","from":"2024-01-01","to":"2024-12-31"}
-{"cmd":"snapshot",    "symbol":"AAPL"}
+{"cmd":"subscribe",        "symbol":"AAPL"}
+{"cmd":"unsubscribe",      "symbol":"AAPL"}
+{"cmd":"history",          "symbol":"AAPL","multiplier":1,"timespan":"day","from":"2024-01-01","to":"2024-12-31"}
+{"cmd":"snapshot",         "symbol":"AAPL"}
 {"cmd":"portfolio_add",    "symbol":"AAPL","shares":10,"price":150.0}
 {"cmd":"portfolio_remove", "symbol":"AAPL"}
 {"cmd":"portfolio_get"}
-{"cmd":"alert_add",    "symbol":"AAPL","condition":"above","price":160.0}
-{"cmd":"alert_remove", "id":3}
+{"cmd":"alert_add",        "symbol":"AAPL","condition":"above","price":160.0}
+{"cmd":"alert_remove",     "id":3}
 {"cmd":"alert_list"}
+{"cmd":"bot_run",          "bot_count":500}
+{"cmd":"backtest",         "run_id":1,"hold_days":30}
 ```
 
-### C → Java (events)
+### Backend → Client (events)
 ```json
-{"type":"quote",     "symbol":"AAPL","price":150.25,"bid":150.20,"ask":150.30,"volume":123456,"ts":1700000000000}
-{"type":"history",   "symbol":"AAPL","bars":[{"t":...,"o":...,"h":...,"l":...,"c":...,"v":...}]}
-{"type":"alert",     "id":3,"symbol":"AAPL","condition":"above","trigger":160.0,"price":161.5}
-{"type":"portfolio", "holdings":[{"symbol":"AAPL","shares":10,"avg_price":150.0,"current":161.5}]}
-{"type":"alert_list","alerts":[{"id":3,"symbol":"AAPL","condition":"above","price":160.0}]}
-{"type":"error",     "message":"..."}
+{"type":"quote",      "symbol":"AAPL","price":150.25,"bid":150.20,"ask":150.30,"volume":123456,"ts":1700000000000}
+{"type":"history",    "symbol":"AAPL","bars":[{"t":...,"o":...,"h":...,"l":...,"c":...,"v":...}]}
+{"type":"alert",      "id":3,"symbol":"AAPL","condition":"above","trigger":160.0,"price":161.5}
+{"type":"portfolio",  "holdings":[{"symbol":"AAPL","shares":10,"avg_price":150.0,"current":161.5}]}
+{"type":"bot_result", "run_id":1,"top_picks":[...]}
+{"type":"backtest",   "run_id":1,"return":0.12,"sharpe":1.5,"max_drawdown":-0.08,"hit_rate":0.65}
+{"type":"error",      "message":"..."}
 ```
 
 ---
 
-## Performance Notes
+## How the Bot Ensemble Works
 
-- **C ring-buffer**: 1 000 prices per symbol kept in memory; O(1) updates.
-- **Thread model**: WS thread, REST worker, IPC accept thread, one thread per client.
-  All state access serialised through a single `pthread_mutex_t`.
-- **Java FX thread**: All quote updates dispatched via `Platform.runLater()`.
-  Chart redraws are deferred to avoid frame drops during high-frequency ticks.
-- **Chart**: Pure Canvas – no external chart library. Renders up to 200 bars,
-  uses hardware-accelerated JavaFX renderer.
+1. **bot_runner.py** spawns 500 Claude Haiku instances, each with a unique investment persona (value, growth, momentum, contrarian, etc.)
+2. Each bot independently selects ~10 stocks from the S&P 500 universe
+3. Picks are sent to the C backend, which **aggregates** them — tickers picked by the most bots rise to the top
+4. The **convergence detector** monitors stability across aggregation windows using Jaccard similarity
+5. The **backtester** simulates an equal-weighted portfolio of the top picks over a configurable holding period, computing return, Sharpe ratio, max drawdown, and hit rate vs SPY
+6. **Budget tracking** enforces a $50/month cap on Anthropic API spend
 
 ---
 
-## Extending
+## Tech Stack
 
-| What | Where |
+| Component | Technology |
 |---|---|
-| Add more Polygon event types (trades, minute aggs) | `polygon_ws.c → process_message()` |
-| Persist portfolio to disk | `market_data.c` + JSON file I/O |
-| Add a mini price-history sparkline | `CandlestickChart.java` (second canvas) |
-| Paper-trading order simulation | new `orders.c` + `OrderView.java` |
-| Volume histogram below chart | extend `CandlestickChart.redraw()` |
+| Backend | C11, OpenSSL, libcurl, libpq, pthreads |
+| Database | PostgreSQL |
+| Bots | Python, Anthropic Claude API |
+| Bridge | Node.js, ws |
+| Frontend | React 18, TypeScript, Vite, Zustand, Tailwind CSS, lightweight-charts |

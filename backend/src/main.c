@@ -17,6 +17,7 @@
 #include "ipc_research.h"
 #include "polygon_ws.h"
 #include "polygon_rest.h"
+#include "crawler.h"
 #include "db.h"
 
 #include <stdio.h>
@@ -64,6 +65,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    crawler_init(api_key);
     ipc_research_init();
 
     if (ipc_server_start() != 0) {

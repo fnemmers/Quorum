@@ -79,6 +79,48 @@ int bot_run_finish(int64_t run_id, int n_bots_actual) {
     return ok;
 }
 
+/* ── Run listing ───────────────────────────────────────────────── */
+
+int bot_runs_list(BotRunInfo *out, int max_rows) {
+    PGconn *conn = db_get_conn();
+    if (!conn || !out || max_rows <= 0) return -1;
+
+    char s_lim[16];
+    snprintf(s_lim, sizeof(s_lim), "%d", max_rows);
+    const char *vals[] = { s_lim };
+
+    PGresult *res = PQexecParams(conn,
+        "SELECT id, label, n_bots_target, n_bots_actual, hold_days, "
+        "       started_at, finished_at "
+        "FROM bot_runs ORDER BY id DESC LIMIT $1;",
+        1, NULL, vals, NULL, NULL, 0);
+
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        fprintf(stderr, "[BOTPICKS] runs_list failed: %s\n",
+                PQerrorMessage(conn));
+        PQclear(res);
+        return -1;
+    }
+
+    int n = PQntuples(res);
+    if (n > max_rows) n = max_rows;
+    for (int i = 0; i < n; i++) {
+        out[i].id            = atoll(PQgetvalue(res, i, 0));
+        const char *lbl      = PQgetvalue(res, i, 1);
+        strncpy(out[i].label, lbl ? lbl : "", BOT_RUN_LABEL_LEN - 1);
+        out[i].label[BOT_RUN_LABEL_LEN - 1] = '\0';
+        out[i].n_bots_target = atoi(PQgetvalue(res, i, 2));
+        out[i].n_bots_actual = PQgetisnull(res, i, 3) ? 0
+                               : atoi(PQgetvalue(res, i, 3));
+        out[i].hold_days     = atoi(PQgetvalue(res, i, 4));
+        out[i].started_at    = atoll(PQgetvalue(res, i, 5));
+        out[i].finished_at   = PQgetisnull(res, i, 6) ? 0
+                               : atoll(PQgetvalue(res, i, 6));
+    }
+    PQclear(res);
+    return n;
+}
+
 /* ── Pick ingestion ────────────────────────────────────────────── */
 
 int bot_picks_insert_batch(int64_t run_id,

@@ -42,6 +42,26 @@ int64_t bot_run_create(const char *label,
  */
 int bot_run_finish(int64_t run_id, int n_bots_actual);
 
+/* ── Run listing ───────────────────────────────────────────────── */
+
+#define BOT_RUN_LABEL_LEN 128
+
+typedef struct BotRunInfo {
+    int64_t id;
+    char    label[BOT_RUN_LABEL_LEN];
+    int     n_bots_target;
+    int     n_bots_actual;   /* 0 if never finished */
+    int     hold_days;
+    int64_t started_at;      /* unix ms */
+    int64_t finished_at;     /* unix ms, 0 if not finished */
+} BotRunInfo;
+
+/*
+ * Fetch up to `max_rows` most recent bot_runs (ORDER BY id DESC), newest
+ * first. Returns the number of rows filled, or -1 on error.
+ */
+int bot_runs_list(BotRunInfo *out, int max_rows);
+
 /* ── Pick ingestion ────────────────────────────────────────────── */
 
 /*

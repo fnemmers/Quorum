@@ -282,7 +282,24 @@ async def main():
     run_id = int(resp["run_id"])
     print(f"[bot_runner] Created run #{run_id} (label: {label})")
 
+    # Crawl fresh news and build a market briefing digest
+    print("[bot_runner] Crawling recent news...")
+    try:
+        await backend.send_command({"cmd": "crawl_news", "limit": 50})
+        digest_resp = await backend.send_command({
+            "cmd": "get_news_digest",
+            "max_chars": 32000,
+            "days": 7,
+        })
+        news_digest = digest_resp.get("digest", "")
+        print(f"[bot_runner] Got news digest: {len(news_digest)} chars")
+    except Exception as e:
+        print(f"[bot_runner] News crawl failed ({e}), continuing without news context")
+        news_digest = ""
+
     system_prompt = SYSTEM_INSTRUCTIONS + "\n\nVALID S&P 500 TICKERS:\n" + ", ".join(tickers)
+    if news_digest:
+        system_prompt += "\n\n" + news_digest
 
     personas = generate_personas(N_BOTS)
     claude_client = anthropic.AsyncAnthropic()

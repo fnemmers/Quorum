@@ -39,6 +39,12 @@
  *        "port_return":..., "bench_return":..., "alpha":...,
  *        "sharpe":..., "max_dd":..., "hit_rate":...,
  *        "n_used":..., "n_skipped":...}
+ *
+ *   {"cmd":"crawl_news","limit":50}
+ *     → {"type":"crawl_done","n_fetched":50,"n_stored":45}
+ *
+ *   {"cmd":"get_news_digest","max_chars":32000,"days":7}
+ *     → {"type":"news_digest","digest":"=== MARKET BRIEFING ..."}
  */
 
 /* Returns 1 if the command was recognized and handled, 0 if not. */

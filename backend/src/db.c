@@ -165,6 +165,23 @@ int db_init(const char *connstr)
         "  created_at    BIGINT  NOT NULL"
         ");");
 
+    /* ── News crawler cache ──────────────────────────────────────── */
+
+    exec_sql(
+        "CREATE TABLE IF NOT EXISTS news_cache ("
+        "  article_id   TEXT PRIMARY KEY,"
+        "  title        TEXT    NOT NULL,"
+        "  description  TEXT    NOT NULL,"
+        "  publisher    TEXT    NOT NULL,"
+        "  url          TEXT    NOT NULL,"
+        "  tickers      TEXT    NOT NULL,"
+        "  published_at BIGINT  NOT NULL"
+        ");");
+
+    exec_sql(
+        "CREATE INDEX IF NOT EXISTS idx_news_cache_published "
+        "ON news_cache (published_at DESC);");
+
     printf("[DB] Schema ready\n");
     return 0;
 }

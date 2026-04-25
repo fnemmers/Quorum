@@ -65,6 +65,23 @@ export interface AggregateResult {
   top: AggPick[];
 }
 
+export interface PaperPosition {
+  symbol:  string;
+  shares:  number;
+  avgCost: number;
+}
+
+export interface PaperTrade {
+  id:     number;
+  ts:     number;
+  symbol: string;
+  side:   'buy' | 'sell';
+  shares: number;
+  price:  number;
+}
+
+export const PAPER_STARTING_CASH = 10_000_000;
+
 export interface BacktestResult {
   run_id: number;
   start_date: string;
@@ -103,8 +120,14 @@ interface State {
   researchBusy: boolean;
   researchError: string | null;
 
+  /* paper trail (simulated portfolio, persisted to localStorage) */
+  paperCash:      number;
+  paperPositions: PaperPosition[];
+  paperTrades:    PaperTrade[];
+
   _ws: WebSocket | null;
   _nextBlotterId: number;
+  _nextPaperTradeId: number;
 
   /* actions */
   setSymbol: (s: string) => void;
@@ -126,6 +149,11 @@ interface State {
   runAggregate: (runId: number, k: number) => void;
   runBacktest: (runId: number, startDate: string, holdDays: number, k: number) => void;
   clearResearchError: () => void;
+
+  /* paper trail actions — return null on success, error string on failure */
+  paperBuy:   (symbol: string, shares: number, price: number) => string | null;
+  paperSell:  (symbol: string, shares: number, price: number) => string | null;
+  paperReset: () => void;
 }
 
 const WS_URL = 'ws://localhost:3001';
@@ -140,6 +168,9 @@ function connect(set: (partial: Partial<State> | ((s: State) => Partial<State>))
     get().fetchPortfolio();
     get().fetchAlerts();
     get().fetchBotRuns();
+    for (const p of get().paperPositions) {
+      get().send({ cmd: 'subscribe', symbol: p.symbol });
+    }
   };
 
   ws.onclose = () => {
@@ -244,8 +275,42 @@ function connect(set: (partial: Partial<State> | ((s: State) => Partial<State>))
   };
 }
 
+/* ── Paper trail localStorage persistence ─────────────────────── */
+
+const PAPER_STORAGE_KEY = 'stock-app:paper-v1';
+
+interface PaperSnapshot {
+  cash:        number;
+  positions:   PaperPosition[];
+  trades:      PaperTrade[];
+  nextTradeId: number;
+}
+
+function loadPaper(): PaperSnapshot {
+  try {
+    const raw = localStorage.getItem(PAPER_STORAGE_KEY);
+    if (!raw) throw new Error('empty');
+    const p = JSON.parse(raw) as Partial<PaperSnapshot>;
+    return {
+      cash:        typeof p.cash === 'number' ? p.cash : PAPER_STARTING_CASH,
+      positions:   Array.isArray(p.positions) ? p.positions : [],
+      trades:      Array.isArray(p.trades)    ? p.trades    : [],
+      nextTradeId: typeof p.nextTradeId === 'number' ? p.nextTradeId : 1,
+    };
+  } catch {
+    return { cash: PAPER_STARTING_CASH, positions: [], trades: [], nextTradeId: 1 };
+  }
+}
+
+function savePaper(s: PaperSnapshot) {
+  try { localStorage.setItem(PAPER_STORAGE_KEY, JSON.stringify(s)); }
+  catch { /* quota / disabled — best effort */ }
+}
+
 export const useStore = create<State>((set, get) => {
   setTimeout(() => connect(set, get), 0);
+
+  const paper = loadPaper();
 
   return {
     bridgeConnected: false,
@@ -266,8 +331,13 @@ export const useStore = create<State>((set, get) => {
     researchBusy: false,
     researchError: null,
 
+    paperCash:      paper.cash,
+    paperPositions: paper.positions,
+    paperTrades:    paper.trades,
+
     _ws: null,
     _nextBlotterId: 1,
+    _nextPaperTradeId: paper.nextTradeId,
 
     setSymbol: (s) => {
       set({ symbol: s, bars: [] });
@@ -345,6 +415,103 @@ export const useStore = create<State>((set, get) => {
     },
 
     clearResearchError: () => set({ researchError: null }),
+
+    paperBuy: (symbol, shares, price) => {
+      symbol = symbol.trim().toUpperCase();
+      if (!symbol)        return 'symbol required';
+      if (shares <= 0)    return 'shares must be > 0';
+      if (price  <= 0)    return 'price must be > 0';
+      const cost = shares * price;
+      const s = get();
+      if (cost > s.paperCash) {
+        return `insufficient cash: need $${cost.toFixed(2)}, have $${s.paperCash.toFixed(2)}`;
+      }
+
+      const existing = s.paperPositions.find((p) => p.symbol === symbol);
+      const newPositions = existing
+        ? s.paperPositions.map((p) => p.symbol === symbol
+            ? {
+                ...p,
+                shares:  p.shares + shares,
+                avgCost: (p.avgCost * p.shares + price * shares) / (p.shares + shares),
+              }
+            : p)
+        : [...s.paperPositions, { symbol, shares, avgCost: price }];
+
+      const trade: PaperTrade = {
+        id:     s._nextPaperTradeId,
+        ts:     Date.now(),
+        symbol, side: 'buy', shares, price,
+      };
+      const newCash = s.paperCash - cost;
+      const newTrades = [trade, ...s.paperTrades];
+
+      set({
+        paperCash:         newCash,
+        paperPositions:    newPositions,
+        paperTrades:       newTrades,
+        _nextPaperTradeId: s._nextPaperTradeId + 1,
+      });
+      savePaper({
+        cash: newCash, positions: newPositions, trades: newTrades,
+        nextTradeId: s._nextPaperTradeId + 1,
+      });
+      get().send({ cmd: 'subscribe', symbol });
+      return null;
+    },
+
+    paperSell: (symbol, shares, price) => {
+      symbol = symbol.trim().toUpperCase();
+      if (!symbol)     return 'symbol required';
+      if (shares <= 0) return 'shares must be > 0';
+      if (price  <= 0) return 'price must be > 0';
+      const s = get();
+      const existing = s.paperPositions.find((p) => p.symbol === symbol);
+      if (!existing)             return `no position in ${symbol}`;
+      if (shares > existing.shares) {
+        return `selling ${shares} but only hold ${existing.shares}`;
+      }
+
+      const proceeds = shares * price;
+      const remaining = existing.shares - shares;
+      const newPositions = remaining > 0
+        ? s.paperPositions.map((p) => p.symbol === symbol
+            ? { ...p, shares: remaining }
+            : p)
+        : s.paperPositions.filter((p) => p.symbol !== symbol);
+
+      const trade: PaperTrade = {
+        id:     s._nextPaperTradeId,
+        ts:     Date.now(),
+        symbol, side: 'sell', shares, price,
+      };
+      const newCash = s.paperCash + proceeds;
+      const newTrades = [trade, ...s.paperTrades];
+
+      set({
+        paperCash:         newCash,
+        paperPositions:    newPositions,
+        paperTrades:       newTrades,
+        _nextPaperTradeId: s._nextPaperTradeId + 1,
+      });
+      savePaper({
+        cash: newCash, positions: newPositions, trades: newTrades,
+        nextTradeId: s._nextPaperTradeId + 1,
+      });
+      return null;
+    },
+
+    paperReset: () => {
+      set({
+        paperCash:         PAPER_STARTING_CASH,
+        paperPositions:    [],
+        paperTrades:       [],
+        _nextPaperTradeId: 1,
+      });
+      savePaper({
+        cash: PAPER_STARTING_CASH, positions: [], trades: [], nextTradeId: 1,
+      });
+    },
   };
 });
 

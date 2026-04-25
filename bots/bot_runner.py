@@ -24,8 +24,19 @@ from budget import BudgetTracker, BudgetExceeded, estimate_run_cost
 BACKEND_HOST = "127.0.0.1"
 BACKEND_PORT = 8765
 N_BOTS = 5
-HOLD_DAYS = 61
-BACKTEST_START = "2025-09-01"  # Sept 1 → Nov 1 2025 (61 days, post-cutoff)
+HOLD_DAYS = 30
+# Rolling 30-day windows. Each is a separate backtest of the SAME consensus
+# picks against a different start date. We don't re-run the bots per window
+# because Polygon news is "now" only — re-running would feed identical context
+# and produce ~identical picks. Reusing one set of picks tests robustness of
+# the consensus across market regimes.
+BACKTEST_WINDOWS = [
+    "2025-07-01",
+    "2025-08-01",
+    "2025-09-01",
+    "2025-10-01",
+    "2025-11-01",
+]
 TOP_K = 20
 MAX_CONCURRENT = 30
 MAX_RETRIES = 3
@@ -340,34 +351,45 @@ async def main():
         pct = entry["count"] / progress.success * 100 if progress.success else 0
         print(f"  {i:2d}. {entry['symbol']:<6s} — {entry['count']} bots ({pct:.1f}%)")
 
-    start = BACKTEST_START
-    start_date = datetime.date.fromisoformat(start)
-    end_date = start_date + datetime.timedelta(days=HOLD_DAYS)
-    print(f"\n[bot_runner] Running backtest ({start} → {end_date.isoformat()}, {HOLD_DAYS} days)...")
+    print(f"\n[bot_runner] Running rolling {HOLD_DAYS}-day backtests "
+          f"across {len(BACKTEST_WINDOWS)} windows...")
 
-    try:
-        bt = await backend.send_command({
-            "cmd": "backtest_run",
-            "run_id": run_id,
-            "k": TOP_K,
-            "start_date": start,
-            "hold_days": HOLD_DAYS,
-        })
+    results = []
+    for start in BACKTEST_WINDOWS:
+        end = (datetime.date.fromisoformat(start)
+               + datetime.timedelta(days=HOLD_DAYS)).isoformat()
+        try:
+            bt = await backend.send_command({
+                "cmd": "backtest_run",
+                "run_id": run_id,
+                "k": TOP_K,
+                "start_date": start,
+                "hold_days": HOLD_DAYS,
+            })
+            results.append(bt)
+            print(f"  {start} → {end}: "
+                  f"port {bt['port_return']:+6.2f}%  "
+                  f"SPY {bt['bench_return']:+6.2f}%  "
+                  f"α {bt['alpha']:+6.2f}%  "
+                  f"Sharpe {bt['sharpe']:+5.2f}")
+        except BackendError as e:
+            print(f"  {start} → {end}: failed ({e})")
 
-        print(f"\n{'=' * 50}")
-        print(f" BACKTEST RESULTS")
-        print(f"{'=' * 50}")
-        print(f"  Period:           {bt['start_date']} → {bt['end_date']}")
-        print(f"  Tickers used:     {bt['n_used']} (skipped {bt['n_skipped']})")
-        print(f"  Portfolio return: {bt['port_return']:+.2f}%")
-        print(f"  Benchmark (SPY):  {bt['bench_return']:+.2f}%")
-        print(f"  Alpha:            {bt['alpha']:+.2f}%")
-        print(f"  Sharpe ratio:     {bt['sharpe']:.2f}")
-        print(f"  Max drawdown:     {bt['max_dd']:.2f}%")
-        print(f"  Hit rate:         {bt['hit_rate']:.1f}%")
-    except BackendError as e:
-        print(f"[bot_runner] Backtest failed: {e}")
-        print("  (This usually means price data hasn't been cached for this date range.)")
+    if results:
+        wins  = sum(1 for r in results if r["alpha"] > 0)
+        avg_a = sum(r["alpha"]        for r in results) / len(results)
+        avg_p = sum(r["port_return"]  for r in results) / len(results)
+        avg_b = sum(r["bench_return"] for r in results) / len(results)
+        avg_s = sum(r["sharpe"]       for r in results) / len(results)
+        print(f"\n{'=' * 60}")
+        print(f" ROLLING BACKTEST SUMMARY ({len(results)} windows)")
+        print(f"{'=' * 60}")
+        print(f"  Avg portfolio return: {avg_p:+.2f}%")
+        print(f"  Avg benchmark (SPY):  {avg_b:+.2f}%")
+        print(f"  Avg alpha:            {avg_a:+.2f}%")
+        print(f"  Avg Sharpe:           {avg_s:+.2f}")
+        print(f"  Beat SPY:             {wins}/{len(results)} windows "
+              f"({wins / len(results) * 100:.0f}%)")
 
     await backend.close()
     print("\n[bot_runner] Done.")

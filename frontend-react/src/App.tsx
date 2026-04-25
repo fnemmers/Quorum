@@ -7,8 +7,9 @@ import AlertPanel from './components/AlertPanel';
 import RiskPanel from './components/RiskPanel';
 import TradeBlotter from './components/TradeBlotter';
 import ResearchPanel from './components/ResearchPanel';
+import PaperTrailPanel from './components/PaperTrailPanel';
 
-type Tab = 'trading' | 'research';
+type Tab = 'trading' | 'research' | 'paper';
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('trading');
@@ -18,11 +19,12 @@ export default function App() {
       <StatusBar />
 
       <div className="flex gap-1 px-2 pt-1 border-b border-border">
-        <TabButton label="Trading"  active={tab === 'trading'}  onClick={() => setTab('trading')} />
-        <TabButton label="Research" active={tab === 'research'} onClick={() => setTab('research')} />
+        <TabButton label="Trading"     active={tab === 'trading'}  onClick={() => setTab('trading')} />
+        <TabButton label="Research"    active={tab === 'research'} onClick={() => setTab('research')} />
+        <TabButton label="Paper Trail" active={tab === 'paper'}    onClick={() => setTab('paper')} />
       </div>
 
-      {tab === 'trading' ? (
+      {tab === 'trading' && (
         <div className="flex flex-1 overflow-hidden gap-2 p-2">
           <div className="flex-1 bg-panel border border-border rounded overflow-hidden">
             <Chart />
@@ -36,9 +38,9 @@ export default function App() {
             <TradeBlotter />
           </div>
         </div>
-      ) : (
-        <ResearchPanel />
       )}
+      {tab === 'research' && <ResearchPanel />}
+      {tab === 'paper'    && <PaperTrailPanel />}
     </div>
   );
 }

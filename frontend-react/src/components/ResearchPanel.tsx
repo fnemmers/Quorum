@@ -12,7 +12,7 @@ function fmtPct(x: number | undefined): string {
 }
 
 function pctClass(x: number | undefined): string {
-  if (x === undefined || x === null || Number.isNaN(x)) return 'text-white';
+  if (x === undefined || x === null || Number.isNaN(x)) return 'text-ink';
   return x >= 0 ? 'text-bull' : 'text-bear';
 }
 
@@ -29,7 +29,7 @@ function RunsList({
   return (
     <div className="bg-panel border border-border rounded p-3 space-y-2 w-72 flex-shrink-0">
       <div className="flex justify-between items-center">
-        <div className="text-xs text-gray-500 uppercase tracking-widest">Bot Runs</div>
+        <div className="text-xs text-subtle uppercase tracking-widest font-bold">Bot Runs</div>
         <button
           onClick={onRefresh}
           className="text-xs text-accent hover:underline"
@@ -37,7 +37,7 @@ function RunsList({
       </div>
       <div className="space-y-1 max-h-[70vh] overflow-y-auto text-xs font-mono">
         {runs.length === 0 && (
-          <div className="text-gray-500 italic">No runs yet. Kick off bot_runner.py.</div>
+          <div className="text-subtle italic">No runs yet. Kick off bot_runner.py.</div>
         )}
         {runs.map((r) => {
           const finished = r.finished_at > 0;
@@ -48,18 +48,18 @@ function RunsList({
               onClick={() => onSelect(r.id)}
               className={`w-full text-left px-2 py-1.5 rounded border transition ${
                 active
-                  ? 'border-accent bg-surface text-white'
-                  : 'border-border text-gray-400 hover:border-accent hover:text-white'
+                  ? 'border-accent bg-surface text-ink'
+                  : 'border-border text-muted hover:border-accent hover:text-ink'
               }`}
             >
               <div className="flex justify-between">
-                <span className="text-white">#{r.id}</span>
-                <span className={finished ? 'text-bull' : 'text-gray-500'}>
+                <span className="text-ink">#{r.id}</span>
+                <span className={finished ? 'text-bull' : 'text-subtle'}>
                   {finished ? 'done' : 'live'}
                 </span>
               </div>
               <div className="truncate">{r.label || '(unnamed)'}</div>
-              <div className="text-gray-500">
+              <div className="text-subtle">
                 {r.n_bots_actual || r.n_bots_target} bots · {r.hold_days}d · {fmtDate(r.started_at)}
               </div>
             </button>
@@ -81,7 +81,7 @@ function AggregationSection({ runId }: { runId: number | null }) {
   return (
     <div className="bg-panel border border-border rounded p-3 space-y-3">
       <div className="flex justify-between items-center">
-        <div className="text-xs text-gray-500 uppercase tracking-widest">Aggregation (Top-K)</div>
+        <div className="text-xs text-subtle uppercase tracking-widest font-bold">Aggregation (Top-K)</div>
         {runId !== null && (
           <button
             onClick={() => runAggregate(runId, k)}
@@ -95,8 +95,8 @@ function AggregationSection({ runId }: { runId: number | null }) {
 
       <div className="text-xs font-mono">
         <div className="flex justify-between mb-1">
-          <span className="text-gray-400">K</span>
-          <span className="text-white">{k}</span>
+          <span className="text-muted">K</span>
+          <span className="text-ink">{k}</span>
         </div>
         <input
           type="range" min={5} max={50} value={k}
@@ -106,19 +106,19 @@ function AggregationSection({ runId }: { runId: number | null }) {
       </div>
 
       {runId === null && (
-        <div className="text-xs text-gray-500 italic">Select a run to aggregate.</div>
+        <div className="text-xs text-subtle italic">Select a run to aggregate.</div>
       )}
 
       {agg && (
         <>
-          <div className="text-xs text-gray-400">
+          <div className="text-xs text-muted">
             {agg.n_picks_total} total picks · top {agg.top.length}
           </div>
           <div className="grid grid-cols-2 gap-1 text-xs font-mono max-h-64 overflow-y-auto">
             {agg.top.map((p, i) => (
               <div key={p.symbol} className="flex justify-between border border-border rounded px-2 py-1">
-                <span className="text-gray-500">{i + 1}.</span>
-                <span className="text-white flex-1 ml-2">{p.symbol}</span>
+                <span className="text-subtle">{i + 1}.</span>
+                <span className="text-ink flex-1 ml-2 font-bold">{p.symbol}</span>
                 <span className="text-accent">{p.count}</span>
               </div>
             ))}
@@ -159,15 +159,15 @@ function ConvergenceSection() {
 
   return (
     <div className="bg-panel border border-border rounded p-3 space-y-3">
-      <div className="text-xs text-gray-500 uppercase tracking-widest">Convergence (Jaccard)</div>
+      <div className="text-xs text-subtle uppercase tracking-widest font-bold">Convergence (Jaccard)</div>
 
       <div className="grid grid-cols-2 gap-2 text-xs font-mono">
         <div>
-          <div className="text-gray-400 mb-1">Run A</div>
+          <div className="text-muted mb-1">Run A</div>
           <select
             value={aId}
             onChange={(e) => setAId(e.target.value === '' ? '' : Number(e.target.value))}
-            className="w-full bg-surface border border-border rounded px-2 py-1 text-white"
+            className="w-full bg-surface border border-border rounded px-2 py-1 text-ink"
           >
             <option value="">—</option>
             {botRuns.map((r) => (
@@ -176,11 +176,11 @@ function ConvergenceSection() {
           </select>
         </div>
         <div>
-          <div className="text-gray-400 mb-1">Run B</div>
+          <div className="text-muted mb-1">Run B</div>
           <select
             value={bId}
             onChange={(e) => setBId(e.target.value === '' ? '' : Number(e.target.value))}
-            className="w-full bg-surface border border-border rounded px-2 py-1 text-white"
+            className="w-full bg-surface border border-border rounded px-2 py-1 text-ink"
           >
             <option value="">—</option>
             {botRuns.map((r) => (
@@ -192,8 +192,8 @@ function ConvergenceSection() {
 
       <div className="text-xs font-mono">
         <div className="flex justify-between mb-1">
-          <span className="text-gray-400">K (top-K set size)</span>
-          <span className="text-white">{k}</span>
+          <span className="text-muted">K (top-K set size)</span>
+          <span className="text-ink">{k}</span>
         </div>
         <input
           type="range" min={5} max={50} value={k}
@@ -213,11 +213,11 @@ function ConvergenceSection() {
       {aggA && aggB && (
         <>
           <div className="border-t border-border pt-2 text-center">
-            <div className="text-xs text-gray-400 uppercase tracking-widest">Jaccard Similarity</div>
-            <div className={`text-3xl font-mono ${stable ? 'text-bull' : 'text-white'}`}>
+            <div className="text-xs text-muted uppercase tracking-widest font-bold">Jaccard Similarity</div>
+            <div className={`text-3xl font-mono ${stable ? 'text-bull' : 'text-ink'}`}>
               {similarity.toFixed(3)}
             </div>
-            <div className={`text-xs ${stable ? 'text-bull' : 'text-gray-500'}`}>
+            <div className={`text-xs ${stable ? 'text-bull' : 'text-subtle'}`}>
               {stable ? 'stable (≥ 0.9)' : 'not yet stable'}
             </div>
           </div>
@@ -226,17 +226,17 @@ function ConvergenceSection() {
             <div>
               <div className="text-accent mb-1">both ({both.length})</div>
               <div className="space-y-0.5 max-h-40 overflow-y-auto">
-                {both.map((s) => <div key={s} className="text-white">{s}</div>)}
+                {both.map((s) => <div key={s} className="text-ink">{s}</div>)}
               </div>
             </div>
             <div>
-              <div className="text-gray-400 mb-1">only A ({onlyA.length})</div>
+              <div className="text-muted mb-1">only A ({onlyA.length})</div>
               <div className="space-y-0.5 max-h-40 overflow-y-auto">
                 {onlyA.map((s) => <div key={s} className="text-bear">{s}</div>)}
               </div>
             </div>
             <div>
-              <div className="text-gray-400 mb-1">only B ({onlyB.length})</div>
+              <div className="text-muted mb-1">only B ({onlyB.length})</div>
               <div className="space-y-0.5 max-h-40 overflow-y-auto">
                 {onlyB.map((s) => <div key={s} className="text-bear">{s}</div>)}
               </div>
@@ -260,40 +260,40 @@ function BacktestSection({ runId }: { runId: number | null }) {
 
   return (
     <div className="bg-panel border border-border rounded p-3 space-y-3">
-      <div className="text-xs text-gray-500 uppercase tracking-widest">Backtest</div>
+      <div className="text-xs text-subtle uppercase tracking-widest font-bold">Backtest</div>
 
       {runId === null && (
-        <div className="text-xs text-gray-500 italic">Select a run to backtest.</div>
+        <div className="text-xs text-subtle italic">Select a run to backtest.</div>
       )}
 
       {runId !== null && (
         <>
           <div className="grid grid-cols-3 gap-2 text-xs font-mono">
             <div>
-              <div className="text-gray-400 mb-1">start</div>
+              <div className="text-muted mb-1">start</div>
               <input
                 type="date"
                 value={startDate}
                 onChange={(e) => setStartDate(e.target.value)}
-                className="w-full bg-surface border border-border rounded px-2 py-1 text-white"
+                className="w-full bg-surface border border-border rounded px-2 py-1 text-ink"
               />
             </div>
             <div>
-              <div className="text-gray-400 mb-1">hold (days)</div>
+              <div className="text-muted mb-1">hold (days)</div>
               <input
                 type="number" min={1} max={365}
                 value={holdDays}
                 onChange={(e) => setHoldDays(Number(e.target.value))}
-                className="w-full bg-surface border border-border rounded px-2 py-1 text-white"
+                className="w-full bg-surface border border-border rounded px-2 py-1 text-ink"
               />
             </div>
             <div>
-              <div className="text-gray-400 mb-1">K</div>
+              <div className="text-muted mb-1">K</div>
               <input
                 type="number" min={1} max={50}
                 value={k}
                 onChange={(e) => setK(Number(e.target.value))}
-                className="w-full bg-surface border border-border rounded px-2 py-1 text-white"
+                className="w-full bg-surface border border-border rounded px-2 py-1 text-ink"
               />
             </div>
           </div>
@@ -308,16 +308,16 @@ function BacktestSection({ runId }: { runId: number | null }) {
 
           {bt && (
             <div className="border-t border-border pt-3 space-y-2 text-xs font-mono">
-              <div className="text-gray-400">
+              <div className="text-muted">
                 {bt.start_date} → {bt.end_date} ({bt.hold_days}d) · {bt.n_used} used / {bt.n_skipped} skipped
               </div>
               <div className="grid grid-cols-3 gap-2">
                 <Metric label="portfolio"  value={fmtPct(bt.port_return)}  cls={pctClass(bt.port_return)} />
                 <Metric label="SPY"        value={fmtPct(bt.bench_return)} cls={pctClass(bt.bench_return)} />
                 <Metric label="alpha"      value={fmtPct(bt.alpha)}        cls={pctClass(bt.alpha)} />
-                <Metric label="Sharpe"     value={bt.sharpe.toFixed(2)}    cls={bt.sharpe >= 1 ? 'text-bull' : 'text-white'} />
+                <Metric label="Sharpe"     value={bt.sharpe.toFixed(2)}    cls={bt.sharpe >= 1 ? 'text-bull' : 'text-ink'} />
                 <Metric label="max DD"     value={fmtPct(bt.max_dd)}       cls="text-bear" />
-                <Metric label="hit rate"   value={`${bt.hit_rate.toFixed(1)}%`} cls="text-white" />
+                <Metric label="hit rate"   value={`${bt.hit_rate.toFixed(1)}%`} cls="text-ink" />
               </div>
             </div>
           )}
@@ -330,7 +330,7 @@ function BacktestSection({ runId }: { runId: number | null }) {
 function Metric({ label, value, cls }: { label: string; value: string; cls: string }) {
   return (
     <div className="border border-border rounded p-2">
-      <div className="text-gray-500 text-[10px] uppercase tracking-widest">{label}</div>
+      <div className="text-subtle text-[10px] uppercase tracking-widest font-bold">{label}</div>
       <div className={`text-base ${cls}`}>{value}</div>
     </div>
   );

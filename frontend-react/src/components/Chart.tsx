@@ -101,21 +101,21 @@ export default function Chart() {
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-baseline gap-3 px-3 py-2 border-b border-border">
-        <span className="text-white font-bold text-lg">{symbol}</span>
+        <span className="text-ink font-bold text-lg">{symbol}</span>
         {quote && (
           <>
-            <span className="text-white text-2xl font-mono">${quote.price.toFixed(2)}</span>
+            <span className="text-ink text-2xl font-mono">${quote.price.toFixed(2)}</span>
             {pct !== null && (
               <span className={parseFloat(pct) >= 0 ? 'text-bull' : 'text-bear'}>
                 {parseFloat(pct) >= 0 ? '+' : ''}{pct}% YTD
               </span>
             )}
-            <span className="text-gray-500 text-xs ml-auto">
+            <span className="text-subtle text-xs ml-auto">
               Bid {quote.bid.toFixed(2)} · Ask {quote.ask.toFixed(2)}
             </span>
           </>
         )}
-        {!quote && <span className="text-gray-500 text-sm">Awaiting quote…</span>}
+        {!quote && <span className="text-subtle text-sm">Awaiting quote…</span>}
       </div>
       <div ref={containerRef} className="flex-1" />
     </div>

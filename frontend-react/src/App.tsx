@@ -15,7 +15,7 @@ export default function App() {
   const [tab, setTab] = useState<Tab>('trading');
 
   return (
-    <div className="flex flex-col h-screen bg-surface text-white overflow-hidden">
+    <div className="flex flex-col h-screen bg-surface text-ink overflow-hidden">
       <StatusBar />
 
       <div className="flex gap-1 px-2 pt-1 border-b border-border">
@@ -50,10 +50,10 @@ function TabButton({ label, active, onClick }:
   return (
     <button
       onClick={onClick}
-      className={`px-4 py-1.5 text-xs uppercase tracking-widest rounded-t border border-b-0 ${
+      className={`px-4 py-1.5 text-xs uppercase tracking-widest font-bold rounded-t border border-b-0 ${
         active
-          ? 'bg-panel border-border text-white'
-          : 'bg-surface border-transparent text-gray-500 hover:text-white'
+          ? 'bg-panel border-border text-ink'
+          : 'bg-surface border-transparent text-subtle hover:text-ink'
       }`}
     >
       {label}

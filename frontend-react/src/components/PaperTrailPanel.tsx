@@ -44,13 +44,13 @@ function HeaderStats({ positions }: { positions: PaperPosition[] }) {
   );
 }
 
-function Stat({ label, value, sub, valueClass = 'text-white' }:
+function Stat({ label, value, sub, valueClass = 'text-ink' }:
               { label: string; value: string; sub: string; valueClass?: string }) {
   return (
     <div className="bg-panel border border-border rounded p-3">
-      <div className="text-[10px] uppercase tracking-widest text-gray-500">{label}</div>
+      <div className="text-[10px] uppercase tracking-widest font-bold text-subtle">{label}</div>
       <div className={`text-lg font-mono ${valueClass}`}>{value}</div>
-      <div className="text-[10px] text-gray-500 font-mono">{sub}</div>
+      <div className="text-[10px] text-subtle font-mono">{sub}</div>
     </div>
   );
 }
@@ -87,32 +87,32 @@ function TradeForm() {
 
   return (
     <div className="bg-panel border border-border rounded p-3 space-y-3">
-      <div className="text-xs text-gray-500 uppercase tracking-widest">Manual Trade</div>
+      <div className="text-xs text-subtle uppercase tracking-widest font-bold">Manual Trade</div>
 
       <div className="grid grid-cols-3 gap-2 text-xs font-mono">
         <div>
-          <div className="text-gray-400 mb-1">symbol</div>
+          <div className="text-muted mb-1">symbol</div>
           <input
             type="text"
             value={symbol}
             onChange={(e) => setSymbol(e.target.value.toUpperCase())}
             placeholder="AAPL"
-            className="w-full bg-surface border border-border rounded px-2 py-1 text-white uppercase"
+            className="w-full bg-surface border border-border rounded px-2 py-1 text-ink uppercase"
           />
         </div>
         <div>
-          <div className="text-gray-400 mb-1">shares</div>
+          <div className="text-muted mb-1">shares</div>
           <input
             type="number" min={0} step="any"
             value={shares}
             onChange={(e) => setShares(e.target.value)}
             placeholder="100"
-            className="w-full bg-surface border border-border rounded px-2 py-1 text-white"
+            className="w-full bg-surface border border-border rounded px-2 py-1 text-ink"
           />
         </div>
         <div>
           <div className="flex justify-between">
-            <span className="text-gray-400 mb-1">price</span>
+            <span className="text-muted mb-1">price</span>
             <button
               type="button"
               onClick={fillFromQuote}
@@ -125,7 +125,7 @@ function TradeForm() {
             value={price}
             onChange={(e) => setPrice(e.target.value)}
             placeholder="150.00"
-            className="w-full bg-surface border border-border rounded px-2 py-1 text-white"
+            className="w-full bg-surface border border-border rounded px-2 py-1 text-ink"
           />
         </div>
       </div>
@@ -137,7 +137,7 @@ function TradeForm() {
         >BUY</button>
         <button
           onClick={() => submit('sell')}
-          className="py-1.5 rounded bg-bear text-white font-bold text-sm hover:opacity-90"
+          className="py-1.5 rounded bg-bear text-ink font-bold text-sm hover:opacity-90"
         >SELL</button>
       </div>
 
@@ -154,15 +154,15 @@ function PositionsTable({ positions }: { positions: PaperPosition[] }) {
 
   return (
     <div className="bg-panel border border-border rounded p-3 space-y-2">
-      <div className="text-xs text-gray-500 uppercase tracking-widest">Positions</div>
+      <div className="text-xs text-subtle uppercase tracking-widest font-bold">Positions</div>
 
       {positions.length === 0 ? (
-        <div className="text-xs text-gray-500 italic">No open positions.</div>
+        <div className="text-xs text-subtle italic">No open positions.</div>
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-xs font-mono">
             <thead>
-              <tr className="text-gray-500 text-left border-b border-border">
+              <tr className="text-subtle text-left border-b border-border">
                 <th className="py-1 pr-2">Symbol</th>
                 <th className="py-1 pr-2 text-right">Shares</th>
                 <th className="py-1 pr-2 text-right">Avg Cost</th>
@@ -183,10 +183,10 @@ function PositionsTable({ positions }: { positions: PaperPosition[] }) {
                 const stale = !quotes[p.symbol];
                 return (
                   <tr key={p.symbol} className="border-b border-border/50">
-                    <td className="py-1 pr-2 text-white">{p.symbol}</td>
+                    <td className="py-1 pr-2 text-ink font-bold">{p.symbol}</td>
                     <td className="py-1 pr-2 text-right">{p.shares}</td>
                     <td className="py-1 pr-2 text-right">{fmtMoney(p.avgCost)}</td>
-                    <td className={`py-1 pr-2 text-right ${stale ? 'text-gray-500 italic' : ''}`}>
+                    <td className={`py-1 pr-2 text-right ${stale ? 'text-subtle italic' : ''}`}>
                       {fmtMoney(last)}{stale && '*'}
                     </td>
                     <td className="py-1 pr-2 text-right">{fmtMoney(mv)}</td>
@@ -197,7 +197,7 @@ function PositionsTable({ positions }: { positions: PaperPosition[] }) {
               })}
             </tbody>
           </table>
-          <div className="text-[10px] text-gray-500 mt-1">* no live quote — using avg cost</div>
+          <div className="text-[10px] text-subtle mt-1">* no live quote — using avg cost</div>
         </div>
       )}
     </div>
@@ -212,17 +212,17 @@ function TradeHistory() {
   return (
     <div className="bg-panel border border-border rounded p-3 space-y-2">
       <div className="flex justify-between items-center">
-        <div className="text-xs text-gray-500 uppercase tracking-widest">Trade History</div>
-        <div className="text-xs text-gray-500 font-mono">{paperTrades.length} trades</div>
+        <div className="text-xs text-subtle uppercase tracking-widest font-bold">Trade History</div>
+        <div className="text-xs text-subtle font-mono">{paperTrades.length} trades</div>
       </div>
 
       {paperTrades.length === 0 ? (
-        <div className="text-xs text-gray-500 italic">No trades yet.</div>
+        <div className="text-xs text-subtle italic">No trades yet.</div>
       ) : (
         <div className="max-h-72 overflow-y-auto">
           <table className="w-full text-xs font-mono">
             <thead className="sticky top-0 bg-panel">
-              <tr className="text-gray-500 text-left border-b border-border">
+              <tr className="text-subtle text-left border-b border-border">
                 <th className="py-1 pr-2">Time</th>
                 <th className="py-1 pr-2">Side</th>
                 <th className="py-1 pr-2">Symbol</th>
@@ -234,11 +234,11 @@ function TradeHistory() {
             <tbody>
               {paperTrades.map((t) => (
                 <tr key={t.id} className="border-b border-border/50">
-                  <td className="py-1 pr-2 text-gray-400">{fmtTs(t.ts)}</td>
+                  <td className="py-1 pr-2 text-muted">{fmtTs(t.ts)}</td>
                   <td className={`py-1 pr-2 ${t.side === 'buy' ? 'text-bull' : 'text-bear'}`}>
                     {t.side.toUpperCase()}
                   </td>
-                  <td className="py-1 pr-2 text-white">{t.symbol}</td>
+                  <td className="py-1 pr-2 text-ink font-bold">{t.symbol}</td>
                   <td className="py-1 pr-2 text-right">{t.shares}</td>
                   <td className="py-1 pr-2 text-right">{fmtMoney(t.price)}</td>
                   <td className="py-1 pr-2 text-right">{fmtMoney(t.shares * t.price)}</td>
@@ -267,12 +267,12 @@ export default function PaperTrailPanel() {
   return (
     <div className="flex-1 overflow-y-auto p-2 space-y-2">
       <div className="flex justify-between items-center">
-        <div className="text-xs text-gray-400 uppercase tracking-widest">
+        <div className="text-xs text-muted uppercase tracking-widest font-bold">
           Paper Trail · {fmtMoney(PAPER_STARTING_CASH)} starting cash
         </div>
         <button
           onClick={onReset}
-          className="text-xs px-3 py-1 rounded border border-border text-gray-400 hover:text-white hover:border-bear"
+          className="text-xs px-3 py-1 rounded border border-border text-muted hover:text-ink hover:border-bear"
         >reset</button>
       </div>
 

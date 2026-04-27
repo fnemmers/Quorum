@@ -6,7 +6,7 @@ export default function StatusBar() {
   const symbols = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'TSLA', 'SPY'];
 
   return (
-    <div className="flex items-center justify-between px-4 py-2 bg-panel border-b border-border text-sm">
+    <div className="flex items-center justify-between px-4 py-2 bg-grey border-b border-border text-sm">
       <div className="flex items-center gap-4">
         <span className="text-accent font-bold tracking-widest">STOCKAPP</span>
         <div className="flex items-center gap-1.5">
@@ -18,11 +18,11 @@ export default function StatusBar() {
       </div>
 
       <div className="flex items-center gap-2">
-        <span className="text-gray-500 text-xs">SYMBOL</span>
+        <span className="text-subtle text-xs">SYMBOL</span>
         <select
           value={symbol}
           onChange={(e) => setSymbol(e.target.value)}
-          className="bg-surface border border-border text-white text-sm px-2 py-1 rounded focus:outline-none focus:border-accent"
+          className="bg-surface border border-border text-ink text-sm px-2 py-1 rounded focus:outline-none focus:border-accent"
         >
           {symbols.map((s) => (
             <option key={s} value={s}>{s}</option>
@@ -34,7 +34,7 @@ export default function StatusBar() {
         <div className="text-bear font-bold animate-pulse">⚠ KILL SWITCH ACTIVE</div>
       )}
 
-      <div className="text-gray-500 text-xs">
+      <div className="text-subtle text-xs">
         {new Date().toLocaleTimeString()}
       </div>
     </div>

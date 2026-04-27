@@ -16,7 +16,7 @@ export default function QuotePanel() {
 
   return (
     <div className="bg-panel border border-border rounded p-3 space-y-2">
-      <div className="text-xs text-gray-500 uppercase tracking-widest">Live Quote</div>
+      <div className="text-xs text-subtle uppercase tracking-widest font-bold">Live Quote</div>
       {quote ? (
         <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm font-mono">
           <Row label="Last"   value={`$${quote.price.toFixed(2)}`} />
@@ -27,7 +27,7 @@ export default function QuotePanel() {
           <Row label="Updated" value={new Date(quote.ts).toLocaleTimeString()} />
         </div>
       ) : (
-        <div className="text-gray-600 text-sm">No data</div>
+        <div className="text-ink text-sm">No data</div>
       )}
     </div>
   );
@@ -36,8 +36,8 @@ export default function QuotePanel() {
 function Row({ label, value }: { label: string; value: string }) {
   return (
     <>
-      <span className="text-gray-500">{label}</span>
-      <span className="text-white">{value}</span>
+      <span className="text-subtle">{label}</span>
+      <span className="text-ink">{value}</span>
     </>
   );
 }

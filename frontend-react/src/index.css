@@ -3,11 +3,12 @@
 @tailwind utilities;
 
 body {
-  background-color: #0f1117;
-  color: #e6edf3;
-  font-family: 'SF Mono', 'Consolas', monospace;
+  background-color: #969690;
+  color: #000000;
+  font-family: 'SF Mono', 'Consolas', 'Courier New', monospace;
 }
 
-::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-track { background: #161b22; }
-::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+::-webkit-scrollbar { width: 12px; }
+::-webkit-scrollbar-track { background: #888882; }
+::-webkit-scrollbar-thumb { background: #000000; border-radius: 0; }
+::-webkit-scrollbar-thumb:hover { background: #1a3c70; }

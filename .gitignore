@@ -1,7 +1,7 @@
 # C build artifacts
 backend/src/*.o
-backend/stock-backend.exe
-backend/stock-backend
+backend/quorum-backend.exe
+backend/quorum-backend
 
 # Java build artifacts
 frontend/target/

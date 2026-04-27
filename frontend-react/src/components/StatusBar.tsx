@@ -8,7 +8,7 @@ export default function StatusBar() {
   return (
     <div className="flex items-center justify-between px-4 py-2 bg-grey border-b border-border text-sm">
       <div className="flex items-center gap-4">
-        <span className="text-accent font-bold tracking-widest">STOCKAPP</span>
+        <span className="text-accent font-bold tracking-widest">QUORUM</span>
         <div className="flex items-center gap-1.5">
           <span className={`w-2 h-2 rounded-full ${bridgeConnected ? 'bg-bull' : 'bg-bear'}`} />
           <span className={bridgeConnected ? 'text-bull' : 'text-bear'}>

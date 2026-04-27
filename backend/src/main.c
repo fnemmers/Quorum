@@ -1,7 +1,7 @@
 /*
- * stock-app backend main entry point
+ * quorum backend main entry point
  *
- * Usage:  stock-backend <POLYGON_API_KEY>
+ * Usage:  quorum-backend <POLYGON_API_KEY>
  *
  * Starts:
  *   1. Market data state
@@ -46,7 +46,7 @@ int main(int argc, char *argv[]) {
     signal(SIGINT,  sig_handler);
     signal(SIGTERM, sig_handler);
 
-    printf("[MAIN] Initialising stock-app backend...\n");
+    printf("[MAIN] Initialising quorum backend...\n");
 
     market_data_init();
     polygon_rest_init(api_key);

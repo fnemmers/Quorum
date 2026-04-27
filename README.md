@@ -1,4 +1,4 @@
-# StockApp
+# Quorum
 
 An AI-powered stock analysis platform that combines a **C backend**, **Python bot ensemble**, **Node.js bridge**, and **React frontend** to aggregate LLM-driven stock picks, backtest them, and display results in real time.
 
@@ -100,9 +100,9 @@ cd bots && pip install -r requirements.txt
 ```bash
 cd backend
 make
-# Produces: stock-backend (macOS/Linux) or stock-backend.exe (Windows)
+# Produces: quorum-backend (macOS/Linux) or quorum-backend.exe (Windows)
 
-./stock-backend YOUR_POLYGON_API_KEY
+./quorum-backend YOUR_POLYGON_API_KEY
 # Starts IPC server on port 8765
 ```
 
@@ -132,7 +132,7 @@ python bot_runner.py
 ## Project Structure
 
 ```
-stock-app/
+quorum/
 ├── backend/
 │   ├── Makefile
 │   └── src/

@@ -53,7 +53,7 @@ static char *polygon_get(const char *url) {
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER,     headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,  write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA,      &buf);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT,      "StockApp/1.0");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT,      "Quorum/1.0");
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT,        15L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);

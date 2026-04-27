@@ -1,5 +1,5 @@
 {
-  "name": "stock-bridge",
+  "name": "quorum-bridge",
   "version": "1.0.0",
   "main": "bridge.js",
   "scripts": {

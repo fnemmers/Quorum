@@ -1,4 +1,4 @@
-# Top-level Makefile — builds every component of stock-app.
+# Top-level Makefile — builds every component of quorum.
 #
 # Usage:
 #   make              # build backend + install bridge/bot deps + build frontend
@@ -48,7 +48,7 @@ run:
 	@set -a; . ./.env; set +a; \
 	  test -n "$$POLYGON_API_KEY" || (echo "ERROR: POLYGON_API_KEY is empty in .env"; exit 1); \
 	  trap 'kill 0' INT TERM; \
-	  ( cd backend      && ./stock-backend "$$POLYGON_API_KEY" ) & \
+	  ( cd backend      && ./quorum-backend "$$POLYGON_API_KEY" ) & \
 	  sleep 1; \
 	  ( cd bridge       && node bridge.js ) & \
 	  ( cd frontend-react && npm run dev ) & \

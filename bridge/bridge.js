@@ -1,5 +1,5 @@
 /**
- * stock-bridge — Node.js WebSocket bridge
+ * quorum-bridge — Node.js WebSocket bridge
  *
  * Browser clients connect via WebSocket on :3001
  * Bridge maintains one TCP connection to C backend on :8765

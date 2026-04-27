@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# stock-app C backend Makefile
+# quorum C backend Makefile
 #
 # Dependencies (MSYS2 MinGW 64-bit):
 #   pacman -S mingw-w64-x86_64-gcc
@@ -12,7 +12,7 @@
 #   curl -LO https://raw.githubusercontent.com/DaveGamble/cJSON/master/cJSON.c
 #
 # Run:
-#   ./stock-backend.exe YOUR_POLYGON_API_KEY [DB_PASSWORD]
+#   ./quorum-backend.exe YOUR_POLYGON_API_KEY [DB_PASSWORD]
 #   DB_PASSWORD defaults to "postgres"
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -28,7 +28,7 @@ ifeq ($(OS),Windows_NT)
 
     CFLAGS  += -D_WIN32_WINNT=0x0601 -I$(PG_INC)
     LDFLAGS += -L$(PG_LIB) -lws2_32 -lssl -lcrypto -lcurl -lpq -lpthread -lm
-    TARGET   = stock-backend.exe
+    TARGET   = quorum-backend.exe
 else
     PG_INC    = $(shell /opt/homebrew/opt/postgresql@17/bin/pg_config --includedir 2>/dev/null || echo /opt/homebrew/include/postgresql@17)
     PG_LIB    = $(shell /opt/homebrew/opt/postgresql@17/bin/pg_config --libdir    2>/dev/null || echo /opt/homebrew/lib/postgresql@17)
@@ -36,7 +36,7 @@ else
     SSL_LIB   = $(shell brew --prefix openssl 2>/dev/null)/lib
     CFLAGS   += -I$(PG_INC) -I$(SSL_INC)
     LDFLAGS  += -L$(SSL_LIB) -L$(PG_LIB) -lssl -lcrypto -lcurl -lpq -lpthread -lm
-    TARGET    = stock-backend
+    TARGET    = quorum-backend
 endif
 
 SRCS = src/main.c            \

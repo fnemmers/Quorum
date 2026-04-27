@@ -1,4 +1,4 @@
-# stock-app — design notes
+# quorum — design notes
 
 Living document. Update this with your own decisions and rationale as the
 project evolves. Future-you (and any interviewer asking "why did you do it
@@ -117,7 +117,7 @@ createdb stockapp
 # Build
 cd backend
 make
-./stock-backend YOUR_POLYGON_API_KEY
+./quorum-backend YOUR_POLYGON_API_KEY
 ```
 
 The build will succeed even with empty stub bodies — they return safe
@@ -128,7 +128,7 @@ empty/zero results until you fill in the algos.
 
 ```bash
 # In one terminal:
-./backend/stock-backend YOUR_POLYGON_KEY
+./backend/quorum-backend YOUR_POLYGON_KEY
 
 # In another:
 nc localhost 8765

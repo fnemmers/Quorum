@@ -153,17 +153,26 @@ void crawler_init(const char *polygon_api_key) {
     printf("[CRAWLER] Initialized\n");
 }
 
-int crawler_fetch_news(int limit) {
+int crawler_fetch_news(int limit, const char *cutoff_date) {
     if (limit <= 0) limit = 50;
     if (limit > 1000) limit = 1000;
 
     char url[1024];
-    snprintf(url, sizeof(url),
-        "https://api.polygon.io/v2/reference/news"
-        "?order=desc&limit=%d&sort=published_utc",
-        limit);
-
-    printf("[CRAWLER] Fetching up to %d articles...\n", limit);
+    if (cutoff_date && *cutoff_date) {
+        snprintf(url, sizeof(url),
+            "https://api.polygon.io/v2/reference/news"
+            "?order=desc&limit=%d&sort=published_utc"
+            "&published_utc.lte=%sT23:59:59Z",
+            limit, cutoff_date);
+        printf("[CRAWLER] Fetching up to %d articles (as of %s)...\n",
+               limit, cutoff_date);
+    } else {
+        snprintf(url, sizeof(url),
+            "https://api.polygon.io/v2/reference/news"
+            "?order=desc&limit=%d&sort=published_utc",
+            limit);
+        printf("[CRAWLER] Fetching up to %d articles...\n", limit);
+    }
 
     char *resp = http_get(url);
     if (!resp) {
@@ -238,28 +247,39 @@ int crawler_fetch_news(int limit) {
     return stored;
 }
 
-char *crawler_build_digest(int max_chars, int days) {
+char *crawler_build_digest(int max_chars, int days, const char *as_of_or_null) {
     PGconn *conn = db_get_conn();
     if (!conn) return NULL;
 
     if (max_chars <= 0) max_chars = 32000;
     if (days <= 0) days = 7;
 
-    /* Compute cutoff timestamp */
-    int64_t now_ms = (int64_t)time(NULL) * 1000LL;
-    int64_t cutoff = now_ms - (int64_t)days * 86400000LL;
-    char s_cutoff[32], s_limit[16];
-    snprintf(s_cutoff, sizeof(s_cutoff), "%lld", (long long)cutoff);
-    snprintf(s_limit,  sizeof(s_limit),  "%d",   200);
+    /* Anchor the window. as_of=YYYY-MM-DD -> end-of-that-day UTC; else now. */
+    int64_t anchor_ms = (int64_t)time(NULL) * 1000LL;
+    if (as_of_or_null && *as_of_or_null) {
+        struct tm t = {0};
+        int y, m, d;
+        if (sscanf(as_of_or_null, "%4d-%2d-%2d", &y, &m, &d) == 3) {
+            t.tm_year = y - 1900; t.tm_mon = m - 1; t.tm_mday = d;
+            t.tm_hour = 23; t.tm_min = 59; t.tm_sec = 59;
+            anchor_ms = (int64_t)timegm(&t) * 1000LL + 999;
+        }
+    }
+    int64_t lower = anchor_ms - (int64_t)days * 86400000LL;
 
-    const char *vals[] = { s_cutoff, s_limit };
+    char s_lower[32], s_upper[32], s_limit[16];
+    snprintf(s_lower, sizeof(s_lower), "%lld", (long long)lower);
+    snprintf(s_upper, sizeof(s_upper), "%lld", (long long)anchor_ms);
+    snprintf(s_limit, sizeof(s_limit), "%d",   200);
+
+    const char *vals[] = { s_lower, s_upper, s_limit };
     PGresult *res = PQexecParams(conn,
         "SELECT title, description, tickers, published_at, publisher "
         "FROM news_cache "
-        "WHERE published_at >= $1 "
+        "WHERE published_at >= $1 AND published_at <= $2 "
         "ORDER BY published_at DESC "
-        "LIMIT $2;",
-        2, NULL, vals, NULL, NULL, 0);
+        "LIMIT $3;",
+        3, NULL, vals, NULL, NULL, 0);
 
     if (PQresultStatus(res) != PGRES_TUPLES_OK) {
         fprintf(stderr, "[CRAWLER] digest query failed: %s\n",

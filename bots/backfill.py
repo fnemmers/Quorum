@@ -2,18 +2,30 @@
 backfill.py — prime the price_cache with daily bars for all S&P 500 tickers
 plus SPY over a chosen date window.
 
+Throttled to respect Polygon's 5 req/min free tier (one request every 13s by
+default). Override with --rps if you have a paid plan. Empty responses are
+retried because Polygon's rate-limiter sometimes returns 200 with no bars
+instead of 429.
+
 Usage:
     python bots/backfill.py 2025-09-01 2025-11-08
+    python bots/backfill.py 2025-06-15 2025-12-15 --rps 10   # paid tier
 """
 
+import argparse
 import asyncio
 import json
 import sys
+import time
 
 
 BACKEND_HOST = "127.0.0.1"
 BACKEND_PORT = 8765
-CONCURRENCY = 8
+
+# Free-tier safe default: 5 requests/min ⇒ 1 every 13s (slack for clock skew).
+DEFAULT_GAP_SEC = 13.0
+EMPTY_RETRIES = 2
+EMPTY_BACKOFF_SEC = 30.0
 
 
 async def send_command(reader, writer, lock, cmd):
@@ -26,8 +38,9 @@ async def send_command(reader, writer, lock, cmd):
         return json.loads(line.decode())
 
 
-async def fetch_history(reader, writer, lock, semaphore, symbol, start, end):
-    async with semaphore:
+async def fetch_history(reader, writer, lock, symbol, start, end):
+    """Returns (n_bars, error_str_or_None). Retries empty responses."""
+    for attempt in range(EMPTY_RETRIES + 1):
         try:
             resp = await send_command(reader, writer, lock, {
                 "cmd": "history",
@@ -38,42 +51,61 @@ async def fetch_history(reader, writer, lock, semaphore, symbol, start, end):
                 "to": end,
             })
             n = len(resp.get("bars", [])) if resp.get("type") == "history" else 0
-            return symbol, n, None
+            if n > 0 or attempt == EMPTY_RETRIES:
+                return n, None
+            # Empty + retries left → wait and retry (likely 200 w/ rate-limit body)
+            await asyncio.sleep(EMPTY_BACKOFF_SEC)
         except Exception as e:
-            return symbol, 0, str(e)
+            return 0, str(e)
 
 
 async def main():
-    if len(sys.argv) != 3:
-        print("Usage: python backfill.py YYYY-MM-DD YYYY-MM-DD", file=sys.stderr)
-        sys.exit(1)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("start", help="YYYY-MM-DD")
+    ap.add_argument("end",   help="YYYY-MM-DD")
+    ap.add_argument("--rps", type=float, default=None,
+                    help="Requests per second (default: ~5/min for free tier)")
+    args = ap.parse_args()
 
-    start, end = sys.argv[1], sys.argv[2]
+    gap_sec = (1.0 / args.rps) if args.rps else DEFAULT_GAP_SEC
 
     reader, writer = await asyncio.open_connection(BACKEND_HOST, BACKEND_PORT)
     lock = asyncio.Lock()
 
     resp = await send_command(reader, writer, lock, {"cmd": "sp500_list"})
     tickers = resp["tickers"]
-    print(f"[backfill] Fetched {len(tickers)} S&P 500 tickers")
+    print(f"[backfill] Fetched {len(tickers)} S&P 500 tickers", flush=True)
 
-    # Include SPY for benchmark
     all_symbols = tickers + ["SPY"]
-    semaphore = asyncio.Semaphore(CONCURRENCY)
+    total = len(all_symbols)
+    eta_min = total * gap_sec / 60
+    print(f"[backfill] Fetching {args.start} → {args.end} for {total} symbols "
+          f"({gap_sec:.1f}s/req, ETA ~{eta_min:.0f} min)...", flush=True)
 
-    print(f"[backfill] Fetching {start} → {end} for {len(all_symbols)} symbols...")
-    results = await asyncio.gather(*[
-        fetch_history(reader, writer, lock, semaphore, s, start, end)
-        for s in all_symbols
-    ])
+    ok = empty = failed = 0
+    t0 = time.time()
+    for i, sym in enumerate(all_symbols, 1):
+        n, err = await fetch_history(reader, writer, lock, sym, args.start, args.end)
+        if err is not None:
+            failed += 1
+            tag = f"FAIL ({err})"
+        elif n == 0:
+            empty += 1
+            tag = "empty"
+        else:
+            ok += 1
+            tag = f"{n} bars"
+        elapsed = time.time() - t0
+        rate = i / elapsed if elapsed > 0 else 0
+        print(f"  [{i:3d}/{total}] {sym:<6s} {tag:<14s}  "
+              f"({rate*60:.1f}/min, ok={ok} empty={empty} fail={failed})",
+              flush=True)
+        # Throttle (skip after the last call)
+        if i < total:
+            await asyncio.sleep(gap_sec)
 
-    ok = sum(1 for _, n, _ in results if n > 0)
-    empty = sum(1 for _, n, e in results if n == 0 and e is None)
-    failed = [(s, e) for s, n, e in results if e is not None]
-
-    print(f"[backfill] {ok} ok, {empty} empty, {len(failed)} failed")
-    for s, e in failed[:10]:
-        print(f"  FAIL {s}: {e}")
+    print(f"[backfill] DONE — {ok} ok, {empty} empty, {failed} failed "
+          f"in {(time.time()-t0)/60:.1f} min", flush=True)
 
     writer.close()
     await writer.wait_closed()

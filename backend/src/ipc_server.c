@@ -3,6 +3,7 @@
 #include "market_data.h"
 #include "polygon_ws.h"
 #include "polygon_rest.h"
+#include "db.h"
 #include "cJSON.h"
 
 #include <stdio.h>
@@ -106,6 +107,11 @@ static void cmd_history(sock_t fd, cJSON *root) {
         free(bars);
         return;
     }
+
+    /* Persist into price_cache so the backtester (and future calls) can
+     * read these bars without hitting Polygon again. This is what makes
+     * bots/backfill.py actually populate the cache. */
+    if (count > 0) db_cache_store(sym->valuestring, tspan, bars, count);
 
     /* Build JSON response */
     cJSON *resp  = cJSON_CreateObject();

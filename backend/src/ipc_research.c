@@ -349,9 +349,12 @@ static void cmd_backtest_run(int fd, cJSON *root) {
 
 static void cmd_crawl_news(int fd, cJSON *root) {
     cJSON *jl = cJSON_GetObjectItemCaseSensitive(root, "limit");
+    cJSON *jc = cJSON_GetObjectItemCaseSensitive(root, "cutoff_date");
     int limit = (jl && cJSON_IsNumber(jl)) ? (int)jl->valuedouble : 50;
+    const char *cutoff = (jc && cJSON_IsString(jc) && jc->valuestring[0])
+        ? jc->valuestring : NULL;
 
-    int n = crawler_fetch_news(limit);
+    int n = crawler_fetch_news(limit, cutoff);
     if (n < 0) {
         send_error(fd, "crawl_news failed");
         return;
@@ -370,10 +373,13 @@ static void cmd_crawl_news(int fd, cJSON *root) {
 static void cmd_get_news_digest(int fd, cJSON *root) {
     cJSON *jc = cJSON_GetObjectItemCaseSensitive(root, "max_chars");
     cJSON *jd = cJSON_GetObjectItemCaseSensitive(root, "days");
+    cJSON *ja = cJSON_GetObjectItemCaseSensitive(root, "as_of");
     int max_chars = (jc && cJSON_IsNumber(jc)) ? (int)jc->valuedouble : 32000;
     int days      = (jd && cJSON_IsNumber(jd)) ? (int)jd->valuedouble : 7;
+    const char *as_of = (ja && cJSON_IsString(ja) && ja->valuestring[0])
+        ? ja->valuestring : NULL;
 
-    char *digest = crawler_build_digest(max_chars, days);
+    char *digest = crawler_build_digest(max_chars, days, as_of);
     if (!digest) {
         send_error(fd, "build_digest failed");
         return;

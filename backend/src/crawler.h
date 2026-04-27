@@ -33,9 +33,12 @@ void crawler_init(const char *polygon_api_key);
 /*
  * Fetch recent news articles from Polygon.io and store them in news_cache.
  * `limit` controls how many articles to request (max 1000, Polygon caps it).
+ * `cutoff_date` (YYYY-MM-DD) bounds the request to articles published on or
+ * before that date — pass NULL to fetch the most recent articles regardless
+ * of date. Used by backtest runs to keep the news context honest.
  * Returns number of new articles stored, or -1 on error.
  */
-int crawler_fetch_news(int limit);
+int crawler_fetch_news(int limit, const char *cutoff_date);
 
 /*
  * Build a plain-text market briefing digest from cached articles.
@@ -43,9 +46,11 @@ int crawler_fetch_news(int limit);
  * `max_chars` caps the output size (~4 chars per token, so 32000 chars
  * gives roughly 8000 tokens).
  * `days` controls the lookback window (0 = all time).
+ * `as_of_or_null` (YYYY-MM-DD) anchors the lookback window — articles are
+ * limited to (as_of - days, as_of]. Pass NULL to anchor at "now".
  *
  * Returns a malloc'd string the caller must free, or NULL on error.
  */
-char *crawler_build_digest(int max_chars, int days);
+char *crawler_build_digest(int max_chars, int days, const char *as_of_or_null);
 
 #endif /* CRAWLER_H */

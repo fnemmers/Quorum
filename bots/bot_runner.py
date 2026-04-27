@@ -1,12 +1,19 @@
 """
-bot_runner.py — 500 Claude Haiku bots pick S&P 500 stocks.
+bot_runner.py — Claude Haiku bots pick S&P 500 stocks.
 
-Usage:
+Default usage (live, Haiku 4.5):
     ANTHROPIC_API_KEY=... python bots/bot_runner.py
 
+Override config:
+    python bots/bot_runner.py --model claude-3-haiku-20240307 --n-bots 50 \\
+        --news-as-of 2025-06-30
+
 Requires the C backend running on localhost:8765.
+For backtest-mode runs (older model + date-bounded news + custom windows),
+see bots/bot_runner_backtest.py.
 """
 
+import argparse
 import asyncio
 import datetime
 import itertools
@@ -19,29 +26,29 @@ import time
 
 import anthropic
 
-from budget import BudgetTracker, BudgetExceeded, estimate_run_cost
+from budget import (BudgetTracker, BudgetExceeded, estimate_run_cost,
+                    DEFAULT_MODEL, PRICES_BY_MODEL)
 
 BACKEND_HOST = "127.0.0.1"
 BACKEND_PORT = 8765
-N_BOTS = 5
-HOLD_DAYS = 30
-# Rolling 30-day windows. Each is a separate backtest of the SAME consensus
-# picks against a different start date. We don't re-run the bots per window
-# because Polygon news is "now" only — re-running would feed identical context
-# and produce ~identical picks. Reusing one set of picks tests robustness of
-# the consensus across market regimes.
-BACKTEST_WINDOWS = [
+MAX_CONCURRENT = 30
+MAX_RETRIES = 3
+
+# Defaults (mirrored by the argparse layer at the bottom)
+DEFAULT_N_BOTS = 5
+DEFAULT_HOLD_DAYS = 30
+DEFAULT_TOP_K = 20
+DEFAULT_MAX_TOKENS = 300
+# Rolling 30-day windows for backtests. Each is a separate backtest of the SAME
+# consensus picks against a different start date — we don't re-run the bots per
+# window because Polygon news is "now" only without a date cutoff.
+DEFAULT_BACKTEST_WINDOWS = [
     "2025-07-01",
     "2025-08-01",
     "2025-09-01",
     "2025-10-01",
     "2025-11-01",
 ]
-TOP_K = 20
-MAX_CONCURRENT = 30
-MAX_RETRIES = 3
-CLAUDE_MODEL = "claude-haiku-4-5-20251001"
-MAX_TOKENS = 300
 
 SYSTEM_INSTRUCTIONS = """\
 You are a stock market analyst participating in an ensemble forecasting experiment.
@@ -192,15 +199,16 @@ class ProgressTracker:
                       f"— {self.success} success, {self.failed} failed")
 
 
-async def call_claude(client, persona, system_prompt, semaphore, budget=None):
+async def call_claude(client, persona, system_prompt, semaphore,
+                      model, max_tokens=DEFAULT_MAX_TOKENS, budget=None):
     user_msg = f"{persona['description']}\n\nSelect ~10 tickers. Respond with ONLY a JSON array."
 
     for attempt in range(MAX_RETRIES):
         try:
             async with semaphore:
                 response = await client.messages.create(
-                    model=CLAUDE_MODEL,
-                    max_tokens=MAX_TOKENS,
+                    model=model,
+                    max_tokens=max_tokens,
                     system=[
                         {
                             "type": "text",
@@ -231,10 +239,12 @@ async def call_claude(client, persona, system_prompt, semaphore, budget=None):
 
 async def run_single_bot(backend, claude_client, semaphore, run_id,
                          bot_index, persona, valid_tickers, system_prompt,
-                         progress, budget=None):
+                         progress, model, max_tokens=DEFAULT_MAX_TOKENS,
+                         budget=None):
     try:
         raw = await call_claude(claude_client, persona, system_prompt,
-                                semaphore, budget=budget)
+                                semaphore, model=model, max_tokens=max_tokens,
+                                budget=budget)
         picks = extract_tickers(raw, valid_tickers)
         if not picks:
             await progress.record(False)
@@ -253,15 +263,21 @@ async def run_single_bot(backend, claude_client, semaphore, run_id,
         await progress.record(False)
 
 
-async def main():
+async def main(*, model=DEFAULT_MODEL, n_bots=DEFAULT_N_BOTS,
+               hold_days=DEFAULT_HOLD_DAYS, top_k=DEFAULT_TOP_K,
+               max_tokens=DEFAULT_MAX_TOKENS, news_as_of=None,
+               backtest_windows=None, label_prefix="haiku-run"):
+    if backtest_windows is None:
+        backtest_windows = DEFAULT_BACKTEST_WINDOWS
+
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         print("Error: ANTHROPIC_API_KEY environment variable not set.", file=sys.stderr)
         sys.exit(1)
 
-    budget = BudgetTracker()
+    budget = BudgetTracker(model_id=model)
     print(f"[bot_runner] {budget.summary()}")
-    estimated = estimate_run_cost(N_BOTS)
+    estimated = estimate_run_cost(n_bots, model_id=model)
     print(f"[bot_runner] Estimated cost for this run: ${estimated:.4f}")
     try:
         budget.preflight(estimated)
@@ -283,25 +299,30 @@ async def main():
     valid_set = set(tickers)
     print(f"[bot_runner] Fetched {len(tickers)} S&P 500 tickers")
 
-    label = f"haiku-run-{datetime.date.today().isoformat()}"
+    label = f"{label_prefix}-{datetime.date.today().isoformat()}"
     resp = await backend.send_command({
         "cmd": "bot_run_create",
         "label": label,
-        "n_bots_target": N_BOTS,
-        "hold_days": HOLD_DAYS,
+        "n_bots_target": n_bots,
+        "hold_days": hold_days,
     })
     run_id = int(resp["run_id"])
-    print(f"[bot_runner] Created run #{run_id} (label: {label})")
+    print(f"[bot_runner] Created run #{run_id} (label: {label}, model: {model})")
 
-    # Crawl fresh news and build a market briefing digest
-    print("[bot_runner] Crawling recent news...")
+    # Crawl news and build a market briefing digest. If news_as_of is set,
+    # the crawler bounds Polygon's published_utc.lte to that date so the
+    # digest reflects what was knowable at that moment.
+    print(f"[bot_runner] Crawling news"
+          f"{f' (as of {news_as_of})' if news_as_of else ''}...")
     try:
-        await backend.send_command({"cmd": "crawl_news", "limit": 50})
-        digest_resp = await backend.send_command({
-            "cmd": "get_news_digest",
-            "max_chars": 32000,
-            "days": 7,
-        })
+        crawl_cmd = {"cmd": "crawl_news", "limit": 50}
+        if news_as_of:
+            crawl_cmd["cutoff_date"] = news_as_of
+        await backend.send_command(crawl_cmd)
+        digest_cmd = {"cmd": "get_news_digest", "max_chars": 32000, "days": 7}
+        if news_as_of:
+            digest_cmd["as_of"] = news_as_of
+        digest_resp = await backend.send_command(digest_cmd)
         news_digest = digest_resp.get("digest", "")
         print(f"[bot_runner] Got news digest: {len(news_digest)} chars")
     except Exception as e:
@@ -312,24 +333,24 @@ async def main():
     if news_digest:
         system_prompt += "\n\n" + news_digest
 
-    personas = generate_personas(N_BOTS)
+    personas = generate_personas(n_bots)
     claude_client = anthropic.AsyncAnthropic()
     semaphore = asyncio.Semaphore(MAX_CONCURRENT)
-    progress = ProgressTracker(N_BOTS)
+    progress = ProgressTracker(n_bots)
 
-    print(f"[bot_runner] Starting {N_BOTS} bot calls (concurrency: {MAX_CONCURRENT})...")
+    print(f"[bot_runner] Starting {n_bots} bot calls (concurrency: {MAX_CONCURRENT})...")
     t0 = time.time()
 
     await asyncio.gather(*[
         run_single_bot(backend, claude_client, semaphore, run_id,
                        i, personas[i], valid_set, system_prompt, progress,
-                       budget=budget)
-        for i in range(N_BOTS)
+                       model=model, max_tokens=max_tokens, budget=budget)
+        for i in range(n_bots)
     ])
 
     elapsed = time.time() - t0
     print(f"[bot_runner] All bots complete in {elapsed:.1f}s: "
-          f"{progress.success}/{N_BOTS} succeeded")
+          f"{progress.success}/{n_bots} succeeded")
     print(f"[bot_runner] {budget.summary()}")
 
     await backend.send_command({
@@ -341,30 +362,30 @@ async def main():
     agg = await backend.send_command({
         "cmd": "aggregate_run",
         "run_id": run_id,
-        "k": TOP_K,
+        "k": top_k,
     })
 
     print(f"\n{'=' * 50}")
-    print(f" TOP {TOP_K} CONSENSUS PICKS ({agg['n_picks_total']} total picks)")
+    print(f" TOP {top_k} CONSENSUS PICKS ({agg['n_picks_total']} total picks)")
     print(f"{'=' * 50}")
     for i, entry in enumerate(agg["top"], 1):
         pct = entry["count"] / progress.success * 100 if progress.success else 0
         print(f"  {i:2d}. {entry['symbol']:<6s} — {entry['count']} bots ({pct:.1f}%)")
 
-    print(f"\n[bot_runner] Running rolling {HOLD_DAYS}-day backtests "
-          f"across {len(BACKTEST_WINDOWS)} windows...")
+    print(f"\n[bot_runner] Running rolling {hold_days}-day backtests "
+          f"across {len(backtest_windows)} windows...")
 
     results = []
-    for start in BACKTEST_WINDOWS:
+    for start in backtest_windows:
         end = (datetime.date.fromisoformat(start)
-               + datetime.timedelta(days=HOLD_DAYS)).isoformat()
+               + datetime.timedelta(days=hold_days)).isoformat()
         try:
             bt = await backend.send_command({
                 "cmd": "backtest_run",
                 "run_id": run_id,
-                "k": TOP_K,
+                "k": top_k,
                 "start_date": start,
-                "hold_days": HOLD_DAYS,
+                "hold_days": hold_days,
             })
             results.append(bt)
             print(f"  {start} → {end}: "
@@ -395,5 +416,36 @@ async def main():
     print("\n[bot_runner] Done.")
 
 
+def parse_args(argv=None):
+    """Parse argv into kwargs for main(). Defaults match historical behaviour."""
+    p = argparse.ArgumentParser(description="Run the Claude bot ensemble.")
+    p.add_argument("--model", default=DEFAULT_MODEL,
+                   choices=sorted(PRICES_BY_MODEL.keys()),
+                   help=f"Anthropic model id (default: {DEFAULT_MODEL})")
+    p.add_argument("--n-bots",    type=int, default=DEFAULT_N_BOTS)
+    p.add_argument("--hold-days", type=int, default=DEFAULT_HOLD_DAYS)
+    p.add_argument("--top-k",     type=int, default=DEFAULT_TOP_K)
+    p.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
+    p.add_argument("--news-as-of", default=None,
+                   help="YYYY-MM-DD: bound the news crawl to articles "
+                        "published on or before this date.")
+    p.add_argument("--backtest-window", action="append", default=None,
+                   help="YYYY-MM-DD start date for a backtest window. "
+                        "Repeatable. If omitted, default monthly windows are used.")
+    p.add_argument("--label-prefix", default="haiku-run",
+                   help="Prefix for the bot_run label (default: haiku-run).")
+    args = p.parse_args(argv)
+    return {
+        "model":             args.model,
+        "n_bots":            args.n_bots,
+        "hold_days":         args.hold_days,
+        "top_k":             args.top_k,
+        "max_tokens":        args.max_tokens,
+        "news_as_of":        args.news_as_of,
+        "backtest_windows":  args.backtest_window,
+        "label_prefix":      args.label_prefix,
+    }
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main(**parse_args()))

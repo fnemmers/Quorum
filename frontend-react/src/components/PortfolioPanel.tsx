@@ -30,7 +30,7 @@ export default function PortfolioPanel() {
         </span>
       </div>
 
-      <div className="space-y-1 max-h-36 overflow-y-auto">
+      <div className="space-y-1 max-h-[40vh] overflow-y-auto">
         {holdings.length === 0 && <div className="text-ink text-xs">No holdings</div>}
         {holdings.map((h) => {
           const cur = quotes[h.symbol]?.price ?? h.current ?? h.avg_price;

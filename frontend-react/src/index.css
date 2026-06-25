@@ -12,3 +12,8 @@ body {
 ::-webkit-scrollbar-track { background: #888882; }
 ::-webkit-scrollbar-thumb { background: #000000; border-radius: 0; }
 ::-webkit-scrollbar-thumb:hover { background: #1a3c70; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1.0; }
+  50%      { opacity: 0.4; }
+}

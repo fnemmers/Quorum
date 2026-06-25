@@ -97,6 +97,116 @@ export interface BacktestResult {
   hit_rate: number;
 }
 
+export interface RankedEntry {
+  rank: number;
+  symbol: string;
+  blended_score: number;
+  z_bot: number;
+  z_heston: number;
+  bot_count: number;
+  bot_disagreement: number;
+  expected_return: number;
+  forward_vol: number;
+  es_95: number;
+  prob_loss: number;
+}
+
+export interface RankingResult {
+  run_id: number;
+  sigma_blend: number;
+  w_bot: number;
+  w_heston: number;
+  ranked: RankedEntry[];
+}
+
+export interface RebalanceEvent {
+  event_id: number;
+  symbol: string;
+  decision: 'auto' | 'notify' | 'escalate' | 'hold';
+  suggested_action: 'sell' | 'trim' | 'flip' | 'none';
+  old_blend: number;
+  new_blend: number;
+  exit_threshold: number;
+  obscurity: number;
+  clarity: number;
+  primary_driver: string;
+  score_gap_clarity: number;
+  llm_agreement: number;
+  heston_breach: number;
+  horizon_maturity: number;
+  days_held: number;
+  intended_hold_days: number;
+  debrief: string;
+}
+
+export interface RebalanceCheckResult {
+  run_id: number;
+  sigma_blend: number;
+  exit_threshold: number;
+  events: RebalanceEvent[];
+}
+
+export interface PathBundle {
+  symbol: string;
+  horizon_days: number;
+  n_paths: number;
+  n_steps: number;
+  n_buckets: number;
+  spot: number;
+  price_min: number;
+  price_max: number;
+  expected_return: number;
+  es_95: number;
+  time_days: number[];      // length n_steps + 1
+  density: number[][];      // [n_buckets][n_steps+1] - row 0 is the LOWEST price bucket
+  p05: number[];            // length n_steps + 1
+  p50: number[];
+  p95: number[];
+}
+
+export interface HestonDiagnostics {
+  symbol: string;
+  n_history_bars: number;
+  hist_window_years: number;
+  n_paths_used: number;
+  params: {
+    v0: number; theta: number; kappa: number;
+    sigma_v: number; rho: number;
+  };
+  feller: { lhs: number; rhs: number; ok: boolean };
+  historical: {
+    mean_ann: number; std_ann: number;
+    skew: number; kurt_excess: number;
+  };
+  simulated: {
+    mean_ann: number; std_ann: number;
+    skew: number; kurt_excess: number;
+  };
+  realized_vol: {
+    rv21_mean_vol: number; rv21_std_vol: number;
+    sqrt_theta: number; empirical_vol_of_vol: number;
+  };
+  scores: {
+    moment_match: number; mean_reversion: number; overall: number;
+  };
+}
+
+export interface VolSurface {
+  symbol: string;
+  spot: number;
+  n_strikes: number;
+  n_maturities: number;
+  iv_min: number;
+  iv_max: number;
+  n_failed: number;
+  r: number;
+  strikes: number[];           // length n_strikes (absolute prices)
+  moneyness: number[];         // length n_strikes (strike / spot)
+  maturities_days: number[];   // length n_maturities
+  maturities_years: number[];  // length n_maturities
+  iv: number[][];              // [n_strikes][n_maturities]
+}
+
 interface State {
   bridgeConnected: boolean;
   backendConnected: boolean;
@@ -117,8 +227,24 @@ interface State {
   botRuns: BotRun[];
   aggregates: Record<number, AggregateResult>;  // keyed by run_id
   backtests: Record<number, BacktestResult>;    // keyed by run_id (latest wins)
+  rankings: Record<number, RankingResult>;      // keyed by run_id (blended)
+  rebalanceCheck: RebalanceCheckResult | null;
+  /* Monte Carlo path bundles per symbol (latest run wins). */
+  pathBundles: Record<string, PathBundle>;
+  pathBundleBusy: boolean;
+  /* Heston-implied vol surfaces per symbol. */
+  volSurfaces: Record<string, VolSurface>;
+  volSurfaceBusy: boolean;
+  /* Heston calibration diagnostics per symbol. */
+  hestonDiagnostics: Record<string, HestonDiagnostics>;
+  hestonDiagnosticsBusy: boolean;
+  /* Currently-selected symbol for the MC path bundle viewer. */
+  selectedSymbol: string | null;
   researchBusy: boolean;
   researchError: string | null;
+  /* Local-only: when each holding was opened, ms epoch. Persists in
+   * localStorage so days_held survives page reloads. */
+  heldSince: Record<string, number>;
 
   /* paper trail (simulated portfolio, persisted to localStorage) */
   paperCash:      number;
@@ -148,6 +274,20 @@ interface State {
   fetchBotRuns: (limit?: number) => void;
   runAggregate: (runId: number, k: number) => void;
   runBacktest: (runId: number, startDate: string, holdDays: number, k: number) => void;
+  runRankingBlend: (runId: number, k: number, horizonDays: number,
+                    disagreement?: Record<string, number>) => void;
+  runRebalanceCheck: (runId: number, k: number, horizonDays: number,
+                      disagreement?: Record<string, number>,
+                      intendedHoldDays?: number) => void;
+  selectSymbol: (sym: string | null, horizonDays?: number) => void;
+  runPathBundle: (sym: string, horizonDays: number, nPaths?: number,
+                  nBuckets?: number) => void;
+  runVolSurface: (sym: string, opts?: {
+    nStrikes?: number; nMaturities?: number;
+    moneynessLo?: number; moneynessHi?: number;
+    maxMatDays?: number; r?: number;
+  }) => void;
+  runHestonDiagnostics: (sym: string, nPaths?: number) => void;
   clearResearchError: () => void;
 
   /* paper trail actions — return null on success, error string on failure */
@@ -243,6 +383,89 @@ function connect(set: (partial: Partial<State> | ((s: State) => Partial<State>))
       return;
     }
 
+    if (type === 'ranking_blended') {
+      const r: RankingResult = {
+        run_id:      msg.run_id      as number,
+        sigma_blend: msg.sigma_blend as number,
+        w_bot:       msg.w_bot       as number,
+        w_heston:    msg.w_heston    as number,
+        ranked:      (msg.ranked as RankedEntry[]) ?? [],
+      };
+      set((s) => ({
+        rankings:     { ...s.rankings, [r.run_id]: r },
+        researchBusy: false,
+      }));
+      return;
+    }
+
+    if (type === 'rebalance_check') {
+      const r: RebalanceCheckResult = {
+        run_id:         msg.run_id         as number,
+        sigma_blend:    msg.sigma_blend    as number,
+        exit_threshold: msg.exit_threshold as number,
+        events:         (msg.events as RebalanceEvent[]) ?? [],
+      };
+      set({ rebalanceCheck: r, researchBusy: false });
+      return;
+    }
+
+    if (type === 'heston_diagnostics') {
+      const d = msg as unknown as HestonDiagnostics;
+      set((st) => ({
+        hestonDiagnostics: { ...st.hestonDiagnostics, [d.symbol]: d },
+        hestonDiagnosticsBusy: false,
+      }));
+      return;
+    }
+
+    if (type === 'heston_surface') {
+      const s: VolSurface = {
+        symbol:           msg.symbol           as string,
+        spot:             msg.spot             as number,
+        n_strikes:        msg.n_strikes        as number,
+        n_maturities:     msg.n_maturities     as number,
+        iv_min:           msg.iv_min           as number,
+        iv_max:           msg.iv_max           as number,
+        n_failed:         msg.n_failed         as number,
+        r:                msg.r                as number,
+        strikes:          (msg.strikes          as number[]) ?? [],
+        moneyness:        (msg.moneyness        as number[]) ?? [],
+        maturities_days:  (msg.maturities_days  as number[]) ?? [],
+        maturities_years: (msg.maturities_years as number[]) ?? [],
+        iv:               (msg.iv               as number[][]) ?? [],
+      };
+      set((st) => ({
+        volSurfaces:    { ...st.volSurfaces, [s.symbol]: s },
+        volSurfaceBusy: false,
+      }));
+      return;
+    }
+
+    if (type === 'heston_path_bundle') {
+      const b: PathBundle = {
+        symbol:          msg.symbol          as string,
+        horizon_days:    msg.horizon_days    as number,
+        n_paths:         msg.n_paths         as number,
+        n_steps:         msg.n_steps         as number,
+        n_buckets:       msg.n_buckets       as number,
+        spot:            msg.spot            as number,
+        price_min:       msg.price_min       as number,
+        price_max:       msg.price_max       as number,
+        expected_return: msg.expected_return as number,
+        es_95:           msg.es_95           as number,
+        time_days:       (msg.time_days as number[]) ?? [],
+        density:         (msg.density   as number[][]) ?? [],
+        p05:             (msg.p05       as number[]) ?? [],
+        p50:             (msg.p50       as number[]) ?? [],
+        p95:             (msg.p95       as number[]) ?? [],
+      };
+      set((s) => ({
+        pathBundles:    { ...s.pathBundles, [b.symbol]: b },
+        pathBundleBusy: false,
+      }));
+      return;
+    }
+
     if (type === 'backtest_result') {
       const r: BacktestResult = {
         run_id:       msg.run_id as number,
@@ -307,6 +530,22 @@ function savePaper(s: PaperSnapshot) {
   catch { /* quota / disabled — best effort */ }
 }
 
+const HELD_SINCE_KEY = 'stock-app:held-since-v1';
+
+function loadHeldSince(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(HELD_SINCE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return typeof parsed === 'object' && parsed ? parsed : {};
+  } catch { return {}; }
+}
+
+function saveHeldSince(m: Record<string, number>) {
+  try { localStorage.setItem(HELD_SINCE_KEY, JSON.stringify(m)); }
+  catch { /* best effort */ }
+}
+
 export const useStore = create<State>((set, get) => {
   setTimeout(() => connect(set, get), 0);
 
@@ -328,8 +567,18 @@ export const useStore = create<State>((set, get) => {
     botRuns: [],
     aggregates: {},
     backtests: {},
+    rankings: {},
+    rebalanceCheck: null,
+    pathBundles: {},
+    pathBundleBusy: false,
+    volSurfaces: {},
+    volSurfaceBusy: false,
+    hestonDiagnostics: {},
+    hestonDiagnosticsBusy: false,
+    selectedSymbol: null,
     researchBusy: false,
     researchError: null,
+    heldSince: loadHeldSince(),
 
     paperCash:      paper.cash,
     paperPositions: paper.positions,
@@ -366,11 +615,22 @@ export const useStore = create<State>((set, get) => {
     addHolding: (symbol, shares, price) => {
       get().send({ cmd: 'portfolio_add', symbol, shares, price });
       get().send({ cmd: 'subscribe', symbol });
+      set((s) => {
+        const next = { ...s.heldSince, [symbol]: s.heldSince[symbol] ?? Date.now() };
+        saveHeldSince(next);
+        return { heldSince: next };
+      });
       setTimeout(() => get().fetchPortfolio(), 200);
     },
 
     removeHolding: (symbol) => {
       get().send({ cmd: 'portfolio_remove', symbol });
+      set((s) => {
+        const next = { ...s.heldSince };
+        delete next[symbol];
+        saveHeldSince(next);
+        return { heldSince: next };
+      });
       setTimeout(() => get().fetchPortfolio(), 200);
     },
 
@@ -411,6 +671,87 @@ export const useStore = create<State>((set, get) => {
         start_date: startDate,
         hold_days: holdDays,
         k,
+      });
+    },
+
+    runRankingBlend: (runId, k, horizonDays, disagreement) => {
+      set({ researchBusy: true, researchError: null });
+      get().send({
+        cmd:          'ranking_blend',
+        run_id:       runId,
+        k,
+        horizon_days: horizonDays,
+        disagreement: disagreement ?? {},
+      });
+    },
+
+    selectSymbol: (sym, horizonDays = 21) => {
+      set({ selectedSymbol: sym });
+      if (sym) {
+        get().runPathBundle(sym, horizonDays);
+        get().runVolSurface(sym);
+        get().runHestonDiagnostics(sym);
+      }
+    },
+
+    runPathBundle: (sym, horizonDays, nPaths = 5000, nBuckets = 100) => {
+      set({ pathBundleBusy: true });
+      get().send({
+        cmd:          'heston_path_bundle',
+        symbol:       sym,
+        horizon_days: horizonDays,
+        n_paths:      nPaths,
+        n_buckets:    nBuckets,
+      });
+    },
+
+    runVolSurface: (sym, opts = {}) => {
+      set({ volSurfaceBusy: true });
+      get().send({
+        cmd:           'heston_surface',
+        symbol:        sym,
+        n_strikes:     opts.nStrikes     ?? 21,
+        n_maturities:  opts.nMaturities  ?? 12,
+        moneyness_lo:  opts.moneynessLo  ?? 0.7,
+        moneyness_hi:  opts.moneynessHi  ?? 1.3,
+        max_mat_days:  opts.maxMatDays   ?? 180,
+        r:             opts.r            ?? 0.04,
+      });
+    },
+
+    runHestonDiagnostics: (sym, nPaths = 4000) => {
+      set({ hestonDiagnosticsBusy: true });
+      get().send({
+        cmd:    'heston_diagnostics',
+        symbol: sym,
+        n_paths: nPaths,
+      });
+    },
+
+    runRebalanceCheck: (runId, k, horizonDays, disagreement, intendedHoldDays = 21) => {
+      const s = get();
+      const now = Date.now();
+      const holdings = s.holdings.map((h) => {
+        const since = s.heldSince[h.symbol] ?? now;
+        const days_held = Math.max(0, Math.floor((now - since) / 86400000));
+        const old_blend = s.rankings[runId]?.ranked
+          .find((r) => r.symbol === h.symbol)?.blended_score ?? 0;
+        return {
+          symbol:             h.symbol,
+          old_blend,
+          days_held,
+          intended_hold_days: intendedHoldDays,
+        };
+      });
+      set({ researchBusy: true, researchError: null });
+      get().send({
+        cmd:          'rebalance_check',
+        run_id:       runId,
+        k,
+        horizon_days: horizonDays,
+        disagreement: disagreement ?? {},
+        holdings,
+        exit_rank_band: 2 * k,
       });
     },
 

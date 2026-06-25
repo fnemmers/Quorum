@@ -182,6 +182,56 @@ int db_init(const char *connstr)
         "CREATE INDEX IF NOT EXISTS idx_news_cache_published "
         "ON news_cache (published_at DESC);");
 
+    /* ── Heston MC per-stock risk scores ────────────────────────── */
+
+    exec_sql(
+        "CREATE TABLE IF NOT EXISTS heston_scores ("
+        "  run_id          BIGINT NOT NULL REFERENCES bot_runs(id) ON DELETE CASCADE,"
+        "  symbol          TEXT   NOT NULL,"
+        "  expected_return DOUBLE PRECISION NOT NULL,"
+        "  forward_vol     DOUBLE PRECISION NOT NULL,"
+        "  es_95           DOUBLE PRECISION NOT NULL,"
+        "  prob_loss_5     DOUBLE PRECISION NOT NULL,"
+        "  n_paths_used    INT    NOT NULL,"
+        "  converged       BOOLEAN NOT NULL,"
+        "  created_at      BIGINT NOT NULL,"
+        "  PRIMARY KEY (run_id, symbol)"
+        ");");
+
+    /* ── Active-management rebalance audit log ──────────────────── */
+    /* override is NULL until the user acts on it. action_taken is what
+     * we end up doing - same as suggested_action for AUTO, possibly
+     * different (or NONE) for NOTIFY/ESCALATE after user input. */
+
+    exec_sql(
+        "CREATE TABLE IF NOT EXISTS rebalance_events ("
+        "  id                  BIGSERIAL PRIMARY KEY,"
+        "  symbol              TEXT NOT NULL,"
+        "  decision            TEXT NOT NULL,"
+        "  suggested_action    TEXT NOT NULL,"
+        "  action_taken        TEXT,"
+        "  old_blend           DOUBLE PRECISION NOT NULL,"
+        "  new_blend           DOUBLE PRECISION NOT NULL,"
+        "  exit_threshold      DOUBLE PRECISION NOT NULL,"
+        "  obscurity           DOUBLE PRECISION NOT NULL,"
+        "  clarity             DOUBLE PRECISION NOT NULL,"
+        "  primary_driver      TEXT NOT NULL,"
+        "  score_gap_clarity   DOUBLE PRECISION NOT NULL,"
+        "  llm_agreement       DOUBLE PRECISION NOT NULL,"
+        "  heston_breach       DOUBLE PRECISION NOT NULL,"
+        "  horizon_maturity    DOUBLE PRECISION NOT NULL,"
+        "  days_held           INT NOT NULL,"
+        "  intended_hold_days  INT NOT NULL,"
+        "  debrief             TEXT NOT NULL,"
+        "  user_override       TEXT,"
+        "  created_at          BIGINT NOT NULL,"
+        "  resolved_at         BIGINT"
+        ");");
+
+    exec_sql(
+        "CREATE INDEX IF NOT EXISTS idx_rebalance_symbol "
+        "ON rebalance_events (symbol, created_at DESC);");
+
     printf("[DB] Schema ready\n");
     return 0;
 }
@@ -545,4 +595,136 @@ int db_orders_load(OrderRecord *out, int max_orders)
     }
     PQclear(res);
     return count;
+}
+
+/* ── Heston scores ───────────────────────────────────────────── */
+
+int db_heston_save(long long run_id,
+                   const char *symbol,
+                   double expected_return,
+                   double forward_vol,
+                   double es_95,
+                   double prob_loss_5,
+                   int    n_paths_used,
+                   int    converged)
+{
+    if (!g_conn || !symbol) return -1;
+
+    char s_run[32], s_er[32], s_fv[32], s_es[32], s_pl[32];
+    char s_n[16],  s_conv[8], s_ts[32];
+    snprintf(s_run,  sizeof(s_run),  "%lld", run_id);
+    snprintf(s_er,   sizeof(s_er),   "%.10f", expected_return);
+    snprintf(s_fv,   sizeof(s_fv),   "%.10f", forward_vol);
+    snprintf(s_es,   sizeof(s_es),   "%.10f", es_95);
+    snprintf(s_pl,   sizeof(s_pl),   "%.10f", prob_loss_5);
+    snprintf(s_n,    sizeof(s_n),    "%d",    n_paths_used);
+    snprintf(s_conv, sizeof(s_conv), "%s",    converged ? "true" : "false");
+    snprintf(s_ts,   sizeof(s_ts),   "%lld",  (long long)now_ms());
+
+    const char *vals[] = { s_run, symbol, s_er, s_fv, s_es,
+                           s_pl,  s_n,    s_conv, s_ts };
+    PGresult *res = exec_params(
+        "INSERT INTO heston_scores "
+        "  (run_id, symbol, expected_return, forward_vol, es_95, "
+        "   prob_loss_5, n_paths_used, converged, created_at) "
+        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) "
+        "ON CONFLICT (run_id, symbol) DO UPDATE SET "
+        "  expected_return = EXCLUDED.expected_return,"
+        "  forward_vol     = EXCLUDED.forward_vol,"
+        "  es_95           = EXCLUDED.es_95,"
+        "  prob_loss_5     = EXCLUDED.prob_loss_5,"
+        "  n_paths_used    = EXCLUDED.n_paths_used,"
+        "  converged       = EXCLUDED.converged,"
+        "  created_at      = EXCLUDED.created_at;",
+        9, vals);
+
+    int ok = (PQresultStatus(res) == PGRES_COMMAND_OK) ? 0 : -1;
+    PQclear(res);
+    return ok;
+}
+
+/* ── Rebalance events ─────────────────────────────────────────── */
+
+long long db_rebalance_save(const char *symbol,
+                            const char *decision,
+                            const char *suggested_action,
+                            const char *action_taken_or_null,
+                            double      old_blend,
+                            double      new_blend,
+                            double      exit_threshold,
+                            double      obscurity,
+                            double      clarity,
+                            const char *primary_driver,
+                            double      score_gap_clarity,
+                            double      llm_agreement,
+                            double      heston_breach,
+                            double      horizon_maturity,
+                            int         days_held,
+                            int         intended_hold_days,
+                            const char *debrief)
+{
+    if (!g_conn || !symbol || !decision || !suggested_action) return -1;
+
+    char s_old[32], s_new[32], s_exit[32];
+    char s_obs[32], s_clr[32];
+    char s_gap[32], s_llm[32], s_brc[32], s_hor[32];
+    char s_dh[16], s_ih[16], s_ts[32];
+
+    snprintf(s_old, sizeof(s_old), "%.10f", old_blend);
+    snprintf(s_new, sizeof(s_new), "%.10f", new_blend);
+    snprintf(s_exit,sizeof(s_exit),"%.10f", exit_threshold);
+    snprintf(s_obs, sizeof(s_obs), "%.10f", obscurity);
+    snprintf(s_clr, sizeof(s_clr), "%.10f", clarity);
+    snprintf(s_gap, sizeof(s_gap), "%.10f", score_gap_clarity);
+    snprintf(s_llm, sizeof(s_llm), "%.10f", llm_agreement);
+    snprintf(s_brc, sizeof(s_brc), "%.10f", heston_breach);
+    snprintf(s_hor, sizeof(s_hor), "%.10f", horizon_maturity);
+    snprintf(s_dh,  sizeof(s_dh),  "%d",    days_held);
+    snprintf(s_ih,  sizeof(s_ih),  "%d",    intended_hold_days);
+    snprintf(s_ts,  sizeof(s_ts),  "%lld",  (long long)now_ms());
+
+    const char *vals[] = {
+        symbol, decision, suggested_action, action_taken_or_null,
+        s_old, s_new, s_exit, s_obs, s_clr, primary_driver,
+        s_gap, s_llm, s_brc, s_hor, s_dh, s_ih,
+        debrief, s_ts
+    };
+    PGresult *res = exec_params(
+        "INSERT INTO rebalance_events "
+        "  (symbol, decision, suggested_action, action_taken, "
+        "   old_blend, new_blend, exit_threshold, obscurity, clarity, "
+        "   primary_driver, score_gap_clarity, llm_agreement, "
+        "   heston_breach, horizon_maturity, days_held, intended_hold_days, "
+        "   debrief, created_at) "
+        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,"
+        "        $11,$12,$13,$14,$15,$16,$17,$18) "
+        "RETURNING id;",
+        18, vals);
+
+    long long id = -1;
+    if (PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) > 0)
+        id = atoll(PQgetvalue(res, 0, 0));
+    PQclear(res);
+    return id;
+}
+
+int db_rebalance_resolve(long long  event_id,
+                         const char *action_taken,
+                         const char *user_override_or_null)
+{
+    if (!g_conn || event_id < 0 || !action_taken) return -1;
+
+    char s_id[32], s_ts[32];
+    snprintf(s_id, sizeof(s_id), "%lld", event_id);
+    snprintf(s_ts, sizeof(s_ts), "%lld", (long long)now_ms());
+
+    const char *vals[] = { action_taken, user_override_or_null, s_ts, s_id };
+    PGresult *res = exec_params(
+        "UPDATE rebalance_events "
+        "SET action_taken = $1, user_override = $2, resolved_at = $3 "
+        "WHERE id = $4;",
+        4, vals);
+    int ok = (PQresultStatus(res) == PGRES_COMMAND_OK) ? 0 : -1;
+    PQclear(res);
+    return ok;
 }

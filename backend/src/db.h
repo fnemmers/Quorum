@@ -96,4 +96,51 @@ int db_order_update_status(int id, OrderStatus status,
                            double filled_price, int64_t filled_at);
 int db_orders_load(OrderRecord *out, int max_orders); /* returns count */
 
+/* ── Heston scores ───────────────────────────────────────────── */
+/*
+ * Upsert one Heston score for (run_id, symbol). Returns 0 on success.
+ */
+int db_heston_save(long long run_id,
+                   const char *symbol,
+                   double expected_return,
+                   double forward_vol,
+                   double es_95,
+                   double prob_loss_5,
+                   int    n_paths_used,
+                   int    converged);
+
+/* ── Rebalance events ─────────────────────────────────────────── */
+/*
+ * Insert a new rebalance event. Returns the new row id, or -1 on failure.
+ * The user_override and resolved_at columns are NULL until the user
+ * accepts/overrides via db_rebalance_resolve().
+ */
+long long db_rebalance_save(const char *symbol,
+                            const char *decision,           /* "auto"/"notify"/"escalate"/"hold" */
+                            const char *suggested_action,   /* "sell"/"trim"/"flip"/"none" */
+                            const char *action_taken_or_null,
+                            double      old_blend,
+                            double      new_blend,
+                            double      exit_threshold,
+                            double      obscurity,
+                            double      clarity,
+                            const char *primary_driver,
+                            double      score_gap_clarity,
+                            double      llm_agreement,
+                            double      heston_breach,
+                            double      horizon_maturity,
+                            int         days_held,
+                            int         intended_hold_days,
+                            const char *debrief);
+
+/*
+ * Record the user's resolution of an outstanding NOTIFY/ESCALATE event.
+ * action_taken is the action the user accepted (or "none" if they
+ * rejected the suggestion). override is NULL if accepted as suggested,
+ * or a short note if they overrode.
+ */
+int db_rebalance_resolve(long long  event_id,
+                         const char *action_taken,
+                         const char *user_override_or_null);
+
 #endif /* DB_H */

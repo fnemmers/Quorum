@@ -52,6 +52,10 @@ SRCS = src/main.c            \
        src/convergence.c     \
        src/sp500_universe.c  \
        src/crawler.c         \
+       src/heston.c          \
+       src/heston_surface.c  \
+       src/risk_score.c      \
+       src/rebalance.c       \
        src/cJSON.c
 
 OBJS = $(SRCS:.c=.o)

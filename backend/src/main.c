@@ -25,7 +25,9 @@
 #include <string.h>
 #include <signal.h>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <unistd.h>
 #endif
 
@@ -38,10 +40,11 @@ static void sig_handler(int sig) {
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <POLYGON_API_KEY>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <POLYGON_API_KEY> [DB_PASSWORD]\n", argv[0]);
         return 1;
     }
-    const char *api_key = argv[1];
+    const char *api_key     = argv[1];
+    const char *db_password = (argc >= 3) ? argv[2] : NULL;
 
     signal(SIGINT,  sig_handler);
     signal(SIGTERM, sig_handler);
@@ -52,13 +55,26 @@ int main(int argc, char *argv[]) {
     polygon_rest_init(api_key);
 
     /* Connect to Postgres. The connection string can be overridden via
-     * the PG_CONNSTR env var; defaults to a local dev DB. The schema
-     * (including the new bot_runs/bot_picks/backtest_results tables) is
-     * created on first run. */
+     * the PG_CONNSTR env var; defaults to a local dev DB with the
+     * optional password from argv[2] (passed via make run from .env's
+     * DB_PASSWORD). The schema is auto-created on first connection.
+     *
+     * NOTE: password is embedded in the connstr at runtime only — it
+     * is never logged. PGconnectdb is documented to scrub the input. */
     {
+        char buf[512];
         const char *connstr = getenv("PG_CONNSTR");
-        if (!connstr || !*connstr)
-            connstr = "host=localhost dbname=stockapp user=postgres";
+        if (!connstr || !*connstr) {
+            if (db_password && *db_password) {
+                snprintf(buf, sizeof(buf),
+                    "host=localhost dbname=stockapp user=postgres password=%s",
+                    db_password);
+            } else {
+                snprintf(buf, sizeof(buf),
+                    "host=localhost dbname=stockapp user=postgres");
+            }
+            connstr = buf;
+        }
         if (db_init(connstr) != 0) {
             fprintf(stderr, "[MAIN] db_init failed — research IPC commands "
                             "will not work. Continuing anyway.\n");

@@ -262,7 +262,11 @@ char *crawler_build_digest(int max_chars, int days, const char *as_of_or_null) {
         if (sscanf(as_of_or_null, "%4d-%2d-%2d", &y, &m, &d) == 3) {
             t.tm_year = y - 1900; t.tm_mon = m - 1; t.tm_mday = d;
             t.tm_hour = 23; t.tm_min = 59; t.tm_sec = 59;
-            anchor_ms = (int64_t)timegm(&t) * 1000LL + 999;
+#ifdef _WIN32
+            anchor_ms = (int64_t)_mkgmtime(&t) * 1000LL + 999;
+#else
+            anchor_ms = (int64_t)timegm(&t)    * 1000LL + 999;
+#endif
         }
     }
     int64_t lower = anchor_ms - (int64_t)days * 86400000LL;

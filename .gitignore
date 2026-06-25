@@ -3,9 +3,6 @@ backend/src/*.o
 backend/quorum-backend.exe
 backend/quorum-backend
 
-# Java build artifacts
-frontend/target/
-
 # Node
 node_modules/
 frontend-react/dist/
@@ -24,3 +21,6 @@ bots/budget.json
 # API keys
 *.env
 .env
+
+# Claude Code local settings
+.claude/

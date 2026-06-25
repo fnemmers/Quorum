@@ -1,16 +1,25 @@
 """
-bot_runner.py — Claude Haiku bots pick S&P 500 stocks.
+bot_runner.py — local-LLM bots pick S&P 500 stocks via vLLM.
 
-Default usage (live, Haiku 4.5):
-    ANTHROPIC_API_KEY=... python bots/bot_runner.py
+vLLM is reached over its OpenAI-compatible endpoint (default
+http://localhost:8000/v1). Bring your own model — Qwen 2.5 14B Instruct
+AWQ fits a 24GB 3090 comfortably; anything that obeys JSON-array output
+will work.
 
-Override config:
-    python bots/bot_runner.py --model claude-3-haiku-20240307 --n-bots 50 \\
-        --news-as-of 2025-06-30
+Default usage:
+    python bots/bot_runner.py
 
-Requires the C backend running on localhost:8765.
-For backtest-mode runs (older model + date-bounded news + custom windows),
-see bots/bot_runner_backtest.py.
+Override:
+    VLLM_BASE_URL=http://localhost:8000/v1 \\
+    VLLM_MODEL=Qwen/Qwen2.5-14B-Instruct-AWQ \\
+    python bots/bot_runner.py --n-bots 100 --news-as-of 2025-06-30
+
+Requires the C backend on localhost:8765 and vLLM running on its
+configured port. There is no API budget — concurrency is the only
+practical limit.
+
+For backtest-mode runs (date-bounded news + custom windows), see
+bots/bot_runner_backtest.py.
 """
 
 import argparse
@@ -24,21 +33,29 @@ import re
 import sys
 import time
 
-import anthropic
-
-from budget import (BudgetTracker, BudgetExceeded, estimate_run_cost,
-                    DEFAULT_MODEL, PRICES_BY_MODEL)
+from openai import AsyncOpenAI
+import openai
 
 BACKEND_HOST = "127.0.0.1"
 BACKEND_PORT = 8765
-MAX_CONCURRENT = 30
-MAX_RETRIES = 3
 
-# Defaults (mirrored by the argparse layer at the bottom)
-DEFAULT_N_BOTS = 5
-DEFAULT_HOLD_DAYS = 30
-DEFAULT_TOP_K = 20
+# vLLM serves an OpenAI-compatible API. Override via env to point at a
+# remote box, a different port, or a Tabby/Aphrodite endpoint.
+VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
+VLLM_API_KEY  = os.environ.get("VLLM_API_KEY",  "EMPTY")
+DEFAULT_MODEL = os.environ.get("VLLM_MODEL",    "Qwen/Qwen2.5-14B-Instruct-AWQ")
+
+# vLLM batches well; this is what the client lets through at once. The
+# server's --max-num-seqs caps real concurrency. 64 is fine on a 3090.
+MAX_CONCURRENT = 64
+MAX_RETRIES    = 3
+
+# Defaults (mirrored by argparse at the bottom)
+DEFAULT_N_BOTS     = 100
+DEFAULT_HOLD_DAYS  = 30
+DEFAULT_TOP_K      = 20
 DEFAULT_MAX_TOKENS = 300
+
 # Rolling 30-day windows for backtests. Each is a separate backtest of the SAME
 # consensus picks against a different start date — we don't re-run the bots per
 # window because Polygon news is "now" only without a date cutoff.
@@ -103,9 +120,9 @@ HORIZONS = [
 ]
 
 
-def generate_personas(n):
+def generate_personas(n, seed=42):
     all_combos = list(itertools.product(ARCHETYPES, SECTORS, RISK_LEVELS, HORIZONS))
-    random.seed(42)
+    random.seed(seed)
     random.shuffle(all_combos)
     selected = all_combos[:n]
 
@@ -199,37 +216,45 @@ class ProgressTracker:
                       f"— {self.success} success, {self.failed} failed")
 
 
-async def call_claude(client, persona, system_prompt, semaphore,
-                      model, max_tokens=DEFAULT_MAX_TOKENS, budget=None):
-    user_msg = f"{persona['description']}\n\nSelect ~10 tickers. Respond with ONLY a JSON array."
+async def call_llm(client, persona, system_prompt, semaphore,
+                   model, max_tokens=DEFAULT_MAX_TOKENS, temperature=None):
+    """One vLLM chat-completion call. Returns the raw text response."""
+    user_msg = (f"{persona['description']}\n\n"
+                "Select ~10 tickers. Respond with ONLY a JSON array.")
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": user_msg},
+    ]
 
     for attempt in range(MAX_RETRIES):
         try:
             async with semaphore:
-                response = await client.messages.create(
+                kwargs = dict(
                     model=model,
                     max_tokens=max_tokens,
-                    system=[
-                        {
-                            "type": "text",
-                            "text": system_prompt,
-                            "cache_control": {"type": "ephemeral"},
-                        }
-                    ],
-                    messages=[{"role": "user", "content": user_msg}],
+                    messages=messages,
                 )
-            if budget is not None:
-                budget.record(getattr(response, "usage", None))
-            return response.content[0].text
-        except anthropic.RateLimitError:
+                if temperature is not None:
+                    kwargs["temperature"] = temperature
+                response = await client.chat.completions.create(**kwargs)
+            return response.choices[0].message.content or ""
+        except openai.RateLimitError:
             if attempt < MAX_RETRIES - 1:
                 wait = 2 ** (attempt + 1)
                 print(f"[bot_runner] Rate limited, retrying in {wait}s...")
                 await asyncio.sleep(wait)
             else:
                 raise
-        except anthropic.APIStatusError as e:
-            if e.status_code >= 500 and attempt < MAX_RETRIES - 1:
+        except (openai.APIConnectionError, openai.APITimeoutError) as e:
+            if attempt < MAX_RETRIES - 1:
+                wait = 2 ** (attempt + 1)
+                print(f"[bot_runner] Connection error ({e}), retrying in {wait}s...")
+                await asyncio.sleep(wait)
+            else:
+                raise
+        except openai.APIStatusError as e:
+            if e.status_code and e.status_code >= 500 and attempt < MAX_RETRIES - 1:
                 wait = 2 ** (attempt + 1)
                 print(f"[bot_runner] Server error {e.status_code}, retrying in {wait}s...")
                 await asyncio.sleep(wait)
@@ -237,14 +262,14 @@ async def call_claude(client, persona, system_prompt, semaphore,
                 raise
 
 
-async def run_single_bot(backend, claude_client, semaphore, run_id,
+async def run_single_bot(backend, llm_client, semaphore, run_id,
                          bot_index, persona, valid_tickers, system_prompt,
                          progress, model, max_tokens=DEFAULT_MAX_TOKENS,
-                         budget=None):
+                         temperature=None):
     try:
-        raw = await call_claude(claude_client, persona, system_prompt,
-                                semaphore, model=model, max_tokens=max_tokens,
-                                budget=budget)
+        raw = await call_llm(llm_client, persona, system_prompt,
+                             semaphore, model=model, max_tokens=max_tokens,
+                             temperature=temperature)
         picks = extract_tickers(raw, valid_tickers)
         if not picks:
             await progress.record(False)
@@ -266,24 +291,11 @@ async def run_single_bot(backend, claude_client, semaphore, run_id,
 async def main(*, model=DEFAULT_MODEL, n_bots=DEFAULT_N_BOTS,
                hold_days=DEFAULT_HOLD_DAYS, top_k=DEFAULT_TOP_K,
                max_tokens=DEFAULT_MAX_TOKENS, news_as_of=None,
-               backtest_windows=None, label_prefix="haiku-run"):
+               backtest_windows=None, label_prefix="vllm-run",
+               seed=42, temperature=None, run_backtests=True,
+               base_url=VLLM_BASE_URL, api_key=VLLM_API_KEY):
     if backtest_windows is None:
         backtest_windows = DEFAULT_BACKTEST_WINDOWS
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("Error: ANTHROPIC_API_KEY environment variable not set.", file=sys.stderr)
-        sys.exit(1)
-
-    budget = BudgetTracker(model_id=model)
-    print(f"[bot_runner] {budget.summary()}")
-    estimated = estimate_run_cost(n_bots, model_id=model)
-    print(f"[bot_runner] Estimated cost for this run: ${estimated:.4f}")
-    try:
-        budget.preflight(estimated)
-    except BudgetExceeded as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(2)
 
     backend = BackendClient()
     try:
@@ -293,6 +305,7 @@ async def main(*, model=DEFAULT_MODEL, n_bots=DEFAULT_N_BOTS,
               "Is the C backend running?", file=sys.stderr)
         sys.exit(1)
     print(f"[bot_runner] Connected to backend on {BACKEND_HOST}:{BACKEND_PORT}")
+    print(f"[bot_runner] LLM endpoint: {base_url}  model: {model}")
 
     resp = await backend.send_command({"cmd": "sp500_list"})
     tickers = resp["tickers"]
@@ -329,29 +342,33 @@ async def main(*, model=DEFAULT_MODEL, n_bots=DEFAULT_N_BOTS,
         print(f"[bot_runner] News crawl failed ({e}), continuing without news context")
         news_digest = ""
 
+    # The system prompt is identical across bots, so vLLM's automatic
+    # prefix caching (--enable-prefix-caching) reuses the KV cache for
+    # the shared prefix on every call. No client-side caching knobs.
     system_prompt = SYSTEM_INSTRUCTIONS + "\n\nVALID S&P 500 TICKERS:\n" + ", ".join(tickers)
     if news_digest:
         system_prompt += "\n\n" + news_digest
 
-    personas = generate_personas(n_bots)
-    claude_client = anthropic.AsyncAnthropic()
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
-    progress = ProgressTracker(n_bots)
+    personas = generate_personas(n_bots, seed=seed)
+    llm_client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+    semaphore  = asyncio.Semaphore(MAX_CONCURRENT)
+    progress   = ProgressTracker(n_bots)
 
     print(f"[bot_runner] Starting {n_bots} bot calls (concurrency: {MAX_CONCURRENT})...")
     t0 = time.time()
 
     await asyncio.gather(*[
-        run_single_bot(backend, claude_client, semaphore, run_id,
+        run_single_bot(backend, llm_client, semaphore, run_id,
                        i, personas[i], valid_set, system_prompt, progress,
-                       model=model, max_tokens=max_tokens, budget=budget)
+                       model=model, max_tokens=max_tokens,
+                       temperature=temperature)
         for i in range(n_bots)
     ])
 
     elapsed = time.time() - t0
+    rate = progress.success / elapsed if elapsed > 0 else 0.0
     print(f"[bot_runner] All bots complete in {elapsed:.1f}s: "
-          f"{progress.success}/{n_bots} succeeded")
-    print(f"[bot_runner] {budget.summary()}")
+          f"{progress.success}/{n_bots} succeeded ({rate:.1f} bots/s)")
 
     await backend.send_command({
         "cmd": "bot_run_finish",
@@ -371,6 +388,11 @@ async def main(*, model=DEFAULT_MODEL, n_bots=DEFAULT_N_BOTS,
     for i, entry in enumerate(agg["top"], 1):
         pct = entry["count"] / progress.success * 100 if progress.success else 0
         print(f"  {i:2d}. {entry['symbol']:<6s} — {entry['count']} bots ({pct:.1f}%)")
+
+    if not run_backtests:
+        await backend.close()
+        print(f"\n[bot_runner] Done (backtests skipped). run_id={run_id}")
+        return run_id
 
     print(f"\n[bot_runner] Running rolling {hold_days}-day backtests "
           f"across {len(backtest_windows)} windows...")
@@ -413,34 +435,43 @@ async def main(*, model=DEFAULT_MODEL, n_bots=DEFAULT_N_BOTS,
               f"({wins / len(results) * 100:.0f}%)")
 
     await backend.close()
-    print("\n[bot_runner] Done.")
+    print(f"\n[bot_runner] Done. run_id={run_id}")
+    return run_id
 
 
 def parse_args(argv=None):
     """Parse argv into kwargs for main(). Defaults match historical behaviour."""
-    p = argparse.ArgumentParser(description="Run the Claude bot ensemble.")
+    p = argparse.ArgumentParser(description="Run the local-LLM bot ensemble via vLLM.")
     p.add_argument("--model", default=DEFAULT_MODEL,
-                   choices=sorted(PRICES_BY_MODEL.keys()),
-                   help=f"Anthropic model id (default: {DEFAULT_MODEL})")
+                   help=f"Model name as served by vLLM (default: {DEFAULT_MODEL})")
+    p.add_argument("--base-url", default=VLLM_BASE_URL,
+                   help=f"vLLM OpenAI endpoint (default: {VLLM_BASE_URL})")
     p.add_argument("--n-bots",    type=int, default=DEFAULT_N_BOTS)
     p.add_argument("--hold-days", type=int, default=DEFAULT_HOLD_DAYS)
     p.add_argument("--top-k",     type=int, default=DEFAULT_TOP_K)
     p.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
+    p.add_argument("--temperature", type=float, default=None,
+                   help="Sampling temperature passed to vLLM.")
+    p.add_argument("--seed", type=int, default=42,
+                   help="Seed for persona shuffling (not the model RNG).")
     p.add_argument("--news-as-of", default=None,
                    help="YYYY-MM-DD: bound the news crawl to articles "
                         "published on or before this date.")
     p.add_argument("--backtest-window", action="append", default=None,
                    help="YYYY-MM-DD start date for a backtest window. "
                         "Repeatable. If omitted, default monthly windows are used.")
-    p.add_argument("--label-prefix", default="haiku-run",
-                   help="Prefix for the bot_run label (default: haiku-run).")
+    p.add_argument("--label-prefix", default="vllm-run",
+                   help="Prefix for the bot_run label (default: vllm-run).")
     args = p.parse_args(argv)
     return {
         "model":             args.model,
+        "base_url":          args.base_url,
         "n_bots":            args.n_bots,
         "hold_days":         args.hold_days,
         "top_k":             args.top_k,
         "max_tokens":        args.max_tokens,
+        "temperature":       args.temperature,
+        "seed":              args.seed,
         "news_as_of":        args.news_as_of,
         "backtest_windows":  args.backtest_window,
         "label_prefix":      args.label_prefix,

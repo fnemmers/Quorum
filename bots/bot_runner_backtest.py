@@ -1,15 +1,15 @@
 """
 bot_runner_backtest.py — backtest-mode wrapper around bot_runner.main().
 
-Configures a date-bounded news crawl (--as-of) and rolling backtest windows
-that start *after* that cutoff. The model itself defaults to Haiku 4.5 — as
-of 2026 the older Claude 3.x family is retired from the API, so Haiku 4.5
-(cutoff ~mid 2025) is the oldest cheap model still callable. Backtests
-starting from Aug 2025 onward remain meaningfully out-of-sample.
+Configures a date-bounded news crawl (--as-of) and rolling backtest
+windows that start *after* that cutoff. Honest backtesting requires the
+model not to "know" what happened during the window — for a vLLM model
+that means picking weights with a training cutoff at or before --as-of.
 
 Usage:
-    ANTHROPIC_API_KEY=... python bots/bot_runner_backtest.py \\
-        --as-of 2025-08-01 --rolling 3 --n-bots 5
+    python bots/bot_runner_backtest.py \\
+        --as-of 2025-08-01 --rolling 3 --n-bots 30 \\
+        --model Qwen/Qwen2.5-14B-Instruct-AWQ
 
 Anything not specified falls back to bot_runner.py defaults.
 """
@@ -19,11 +19,8 @@ import asyncio
 import datetime
 import sys
 
-from bot_runner import main, DEFAULT_HOLD_DAYS, DEFAULT_N_BOTS, DEFAULT_TOP_K
-from budget import PRICES_BY_MODEL
-
-
-BACKTEST_DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+from bot_runner import (main, DEFAULT_MODEL, DEFAULT_HOLD_DAYS,
+                        DEFAULT_N_BOTS, DEFAULT_TOP_K, VLLM_BASE_URL)
 
 
 def rolling_windows(start_date, n_windows, step_days=30):
@@ -34,11 +31,13 @@ def rolling_windows(start_date, n_windows, step_days=30):
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="Backtest-mode bot ensemble run.")
-    p.add_argument("--model", default=BACKTEST_DEFAULT_MODEL,
-                   choices=sorted(PRICES_BY_MODEL.keys()),
-                   help=f"Older model with pre-cutoff knowledge "
-                        f"(default: {BACKTEST_DEFAULT_MODEL})")
+    p = argparse.ArgumentParser(description="Backtest-mode bot ensemble run (vLLM).")
+    p.add_argument("--model", default=DEFAULT_MODEL,
+                   help=f"vLLM model name. Pick weights with a training "
+                        f"cutoff at or before --as-of for an honest test. "
+                        f"(default: {DEFAULT_MODEL})")
+    p.add_argument("--base-url", default=VLLM_BASE_URL,
+                   help=f"vLLM OpenAI endpoint (default: {VLLM_BASE_URL})")
     p.add_argument("--as-of", required=True,
                    help="YYYY-MM-DD: simulated knowledge cutoff. News digest "
                         "is bounded to this date and the first backtest window "
@@ -80,14 +79,17 @@ def main_cli(argv=None):
     print(f"[backtest] {args.rolling} rolling {args.hold_days}-day windows "
           f"starting {windows[0]} → ending {windows[-1]} + {args.hold_days}d")
 
+    label_tag = args.model.split("/")[-1].split("-")[0].lower()
+
     asyncio.run(main(
         model=args.model,
+        base_url=args.base_url,
         n_bots=args.n_bots,
         hold_days=args.hold_days,
         top_k=args.top_k,
         news_as_of=args.as_of,
         backtest_windows=windows,
-        label_prefix=f"backtest-{args.model.split('-')[1]}",
+        label_prefix=f"backtest-{label_tag}",
     ))
 
 

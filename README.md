@@ -1,5 +1,7 @@
 # Quorum
 
+as of 6/25/26, implementing Jump Diffusion to model Bates (1996), going from 5 params to 8
+
 An AI-powered stock research platform that combines a **C analytics backend**, a **local-LLM bot ensemble**, a **Node.js bridge**, and a **React frontend** to aggregate LLM-driven stock picks, weight them by a Heston stochastic-vol risk model, and surface a rebalance-ready portfolio in real time.
 
 ```

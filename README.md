@@ -1,6 +1,8 @@
 # Quorum
 
-As of 8/21, I am looking for historical option chain data to properly fit bates before live trading execution.
+As of 8/21, I am looking for historical option chain data to properly fit bates before live trading execution. 
+
+reach out to fnemmers@icloud.com for any inquires
 
 A market-maker-style option research platform. A **C11 analytics backend** calibrates a **Bates stochastic-vol-with-jumps** model per underlying, overlays a **news-driven jump signal**, prices an option grid via the Lewis (2001) Fourier integral, and ranks the grid by the **Q vs P edge**: the gap between the Bates-implied model IV and a synthesized market IV. A **React frontend** surfaces the ranking, MC path bundles, IV surfaces, and Bates diagnostics in real time.
 

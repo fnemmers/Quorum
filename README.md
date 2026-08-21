@@ -137,8 +137,8 @@ Frontend deps (`frontend-react/package.json`): React 18, TypeScript, Vite 5, Zus
 
 ### 1. Get API keys
 
-- **Polygon.io** — sign up at [polygon.io](https://polygon.io). The free tier gives 15-minute delayed quotes and is enough to drive the crawler + calibration.
-- **E\*TRADE** *(optional, live execution — not yet wired)* — sandbox and production key pairs are read from `.env` for future integration.
+- **Polygon.io**: sign up at [polygon.io](https://polygon.io). The free tier gives 15-minute delayed quotes and is enough to drive the crawler + calibration.
+- **E\*TRADE** *(optional, live execution, not yet wired)*: sandbox and production key pairs are read from `.env` for future integration.
 
 ### 2. Vendor cJSON (only if missing)
 
@@ -274,25 +274,25 @@ Poke the protocol manually with `nc localhost 8765`.
 
 ## How the Bates Pipeline Works
 
-1. **Crawl news** — `crawler.c` pulls Polygon news headlines/descriptions into `news_cache`, keyed by ticker + timestamp.
-2. **Compute per-symbol news signal** — `news_jump_recompute()` rolls up the crawl window (default 48h) into a `news_jump_signal` row per symbol: article count, average sentiment, event class (`earn`, `guide`, `down`, `up`, `ma`, `lit`, `macro`, `beat`, `buyback`), and the three jump-parameter deltas (`lam_bump`, `mu_j_bias`, `sigma_j_bump`).
-3. **Calibrate Bates** — `heston.c` fits Bates SV+jump parameters (`κ`, `θ`, `σ_v`, `ρ`, `v₀`, `λ`, `μ_j`, `σ_j`) to the underlying's ~180 daily bars. This is the **market-aligned** Bates.
-4. **Overlay news** — `news_jump_apply()` mutates the calibrated params into the **news-influenced** Bates: `p->lam += lam_bump; p->mu_j += mu_j_bias; p->sigma_j += sigma_j_bump` (zero-clipped on `sigma_j`).
-5. **Price the option grid** — `bates_backtest.c` walks a (symbol × strike × expiry × right) grid. Each option is priced via the Lewis (2001) Fourier integral against the Bates characteristic function, then inverted to a Black-Scholes-equivalent `model_iv`.
-6. **Synthesize a market IV** — `market_iv = model_iv + N(0, noise_sigma_vol) + skew(K/S, T)`, deterministic per (run_id, symbol, K, T). The option data is fake by design — this is a math sanity check for the pipeline, not a live trading number. See `Honest Limitations`.
-7. **Delta-hedge simulator** — for each option, simulate `n_paths` forward Bates paths under the calibrated dynamics; along each path, rebalance a Black-Scholes delta hedge daily at the frozen `market_iv`. Record hedged P&L. For fair edge, `E[P&L] ≈ 0.5 · Γ · S² · (σ_impl² − σ_realized²) · Δt`, and `sign(edge_vol_pts)` should predict `sign(P&L)`.
-8. **Blend into a ranking** — `option_score.c` z-scores the Bates edge (per expiry bucket), the news-jump scalar (per universe), and gamma/vega convexity (per expiry bucket), and fuses them with the default 0.60 / 0.27 / 0.13 weights. Output is sorted descending by `blended_option_score` with `rank` filled — the final **Q vs P ranking**.
+1. **Crawl news**: `crawler.c` pulls Polygon news headlines/descriptions into `news_cache`, keyed by ticker + timestamp.
+2. **Compute per-symbol news signal**: `news_jump_recompute()` rolls up the crawl window (default 48h) into a `news_jump_signal` row per symbol: article count, average sentiment, event class (`earn`, `guide`, `down`, `up`, `ma`, `lit`, `macro`, `beat`, `buyback`), and the three jump-parameter deltas (`lam_bump`, `mu_j_bias`, `sigma_j_bump`).
+3. **Calibrate Bates**: `heston.c` fits Bates SV+jump parameters (`κ`, `θ`, `σ_v`, `ρ`, `v₀`, `λ`, `μ_j`, `σ_j`) to the underlying's ~180 daily bars. This is the **market-aligned** Bates.
+4. **Overlay news**: `news_jump_apply()` mutates the calibrated params into the **news-influenced** Bates: `p->lam += lam_bump; p->mu_j += mu_j_bias; p->sigma_j += sigma_j_bump` (zero-clipped on `sigma_j`).
+5. **Price the option grid**: `bates_backtest.c` walks a (symbol × strike × expiry × right) grid. Each option is priced via the Lewis (2001) Fourier integral against the Bates characteristic function, then inverted to a Black-Scholes-equivalent `model_iv`.
+6. **Synthesize a market IV**: `market_iv = model_iv + N(0, noise_sigma_vol) + skew(K/S, T)`, deterministic per (run_id, symbol, K, T). The option data is fake by design; this is a math sanity check for the pipeline, not a live trading number. See `Honest Limitations`.
+7. **Delta-hedge simulator**: for each option, simulate `n_paths` forward Bates paths under the calibrated dynamics; along each path, rebalance a Black-Scholes delta hedge daily at the frozen `market_iv`. Record hedged P&L. For fair edge, `E[P&L] ≈ 0.5 · Γ · S² · (σ_impl² − σ_realized²) · Δt`, and `sign(edge_vol_pts)` should predict `sign(P&L)`.
+8. **Blend into a ranking**: `option_score.c` z-scores the Bates edge (per expiry bucket), the news-jump scalar (per universe), and gamma/vega convexity (per expiry bucket), and fuses them with the default 0.60 / 0.27 / 0.13 weights. Output is sorted descending by `blended_option_score` with `rank` filled: the final **Q vs P ranking**.
 
-The React **Option Ranking** panel is the terminal view — click a row to open Tick Evaluation for the underlying and inspect the MC fan chart, IV surface, and Heston diagnostics that produced the edge.
+The React **Option Ranking** panel is the terminal view; click a row to open Tick Evaluation for the underlying and inspect the MC fan chart, IV surface, and Heston diagnostics that produced the edge.
 
 ---
 
 ## Honest Limitations
 
-- **Option data is synthesized** — `market_iv` is `model_iv + noise + smile skew`. This exists to validate the math (P&L sign should track edge sign), not to make trading claims. Wiring a real option chain (E\*TRADE, Polygon options) is the next step.
-- **Survivorship bias** — the S&P 500 list is the *current* snapshot, not point-in-time.
+- **Option data is synthesized**: `market_iv` is `model_iv + noise + smile skew`. This exists to validate the math (P&L sign should track edge sign), not to make trading claims. Wiring a real option chain (E\*TRADE, Polygon options) is the next step.
+- **Survivorship bias**: the S&P 500 list is the *current* snapshot, not point-in-time.
 - **Heston/Bates calibration** uses a bounded parameter search, not a full-optimizer surface fit. Fine for ranking, not production-grade for exotics pricing.
-- **News-jump keyword mapping is hand-tuned** — `news_jump.c` uses a small keyword table. An optional local-vLLM sentiment layer is gated behind `QUORUM_NEWS_LLM=1` and contributes an extra `+0.03 · sentiment` to `mu_j_bias`; the keyword `event_class` stays authoritative.
+- **News-jump keyword mapping is hand-tuned**: `news_jump.c` uses a small keyword table. An optional local-vLLM sentiment layer is gated behind `QUORUM_NEWS_LLM=1` and contributes an extra `+0.03 · sentiment` to `mu_j_bias`; the keyword `event_class` stays authoritative.
 - **Transaction cost / bid-ask / market impact** are not modeled in the hedged-P&L path.
 - **Risk-free rate is a single scalar** passed at run start.
 

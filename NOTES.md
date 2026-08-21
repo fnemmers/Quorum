@@ -1,39 +1,35 @@
-# quorum — design notes
+# quorum: design notes
 
-Living document. Update this with your own decisions and rationale as the
-project evolves. Future-you (and any interviewer asking "why did you do it
-this way") will thank you.
+Living document. Update this with rationale as the project evolves. Future-you (and any interviewer asking "why did you build it this way") will thank you.
 
 ---
 
-## Project identity (one-liner)
+## Current identity (one-liner)
 
-A multi-language stock research system: a TypeScript ensemble of LLM-driven
-"analyst bots" generates independent stock picks, a C analytics backend
-aggregates them and backtests the consensus against historical S&P 500 data,
-results displayed in a React frontend. Built around a custom newline-JSON
-TCP IPC protocol on port 8765.
+A market-maker-style option research platform. A C11 backend calibrates a Bates stochastic-vol-with-jumps model per underlying, applies a news-driven overlay to the jump parameters, prices an option grid via the Lewis (2001) Fourier integral, and ranks the grid by the gap between the Bates-implied model IV and a synthesized market IV. React frontend surfaces the ranking, MC path bundles, IV surfaces, and Bates diagnostics in real time. Custom newline-JSON TCP IPC on port 8765.
 
-## Architecture
+## Current architecture
 
 ```
-┌──────────────────┐    HTTP/WS    ┌─────────────────────┐
-│  React frontend  │◄──────────────►  bridge (Node)      │
-│  (sliders, UI)   │                │  (existing)         │
+┌──────────────────┐    WS 3001     ┌─────────────────────┐
+│  React frontend  │◄──────────────►│  bridge (Node)      │
+│  (panels + UI)   │                │                     │
 └──────────────────┘                └─────────┬───────────┘
                                               │ TCP 8765
                                               │ newline JSON
-┌──────────────────┐                          ▼
-│  TS bot system   │  TCP 8765    ┌─────────────────────┐
-│  (Pass 2)        │◄────────────►│  C backend           │
-│  - crawler       │              │  - ipc_server.c      │
-│  - personas      │              │  - ipc_research.c   ◄┐
-│  - orchestrator  │              │  - aggregation.c   ◄─┤ YOU
-│  - budget cap    │              │  - backtest.c      ◄─┤ WRITE
-└──────────────────┘              │  - convergence.c   ◄─┘ THESE
-                                  │  - bot_picks.c (DB)  │
+                                              ▼
+                                  ┌─────────────────────┐
+                                  │  C backend           │
+                                  │  - ipc_server.c      │
+                                  │  - ipc_research.c    │
+                                  │  - heston.c (Bates)  │
+                                  │  - heston_surface.c  │
+                                  │  - bates_backtest.c  │
+                                  │  - news_jump.c       │
+                                  │  - option_score.c    │
+                                  │  - crawler.c         │
                                   │  - sp500_universe.c  │
-                                  │  - polygon_rest.c    │
+                                  │  - polygon_ws/rest.c │
                                   │  - db.c (Postgres)   │
                                   └──────────┬───────────┘
                                              │ libpq
@@ -41,167 +37,126 @@ TCP IPC protocol on port 8765.
                                   ┌─────────────────────┐
                                   │  Postgres            │
                                   │  - price_cache       │
-                                  │  - bot_runs          │
-                                  │  - bot_picks         │
-                                  │  - backtest_results  │
+                                  │  - news_cache        │
+                                  │  - news_jump_signal  │
+                                  │  - bates_backtest_*  │
+                                  │  - option_score_*    │
                                   │  - portfolio (legacy)│
                                   │  - alerts (legacy)   │
                                   └─────────────────────┘
 ```
 
-## Pass 1 — what was added (this commit)
+---
 
-### New C files
+## Evolution of the project
 
-| File                  | What it is                                          |
-|-----------------------|-----------------------------------------------------|
-| `aggregation.h/.c`    | **STUB** — hash-map ticker counter, top-K extractor |
-| `backtest.h/.c`       | **STUB** — equal-weight backtest + Sharpe + DD      |
-| `convergence.h/.c`    | **STUB** — Jaccard similarity for bot stop-rule     |
-| `bot_picks.h/.c`      | Postgres CRUD for runs, picks, backtest results    |
-| `sp500_universe.h/.c` | Static S&P 500 ticker list (~500 entries)          |
-| `ipc_research.h/.c`   | New IPC commands (sp500_list, bot_run_*, etc.)     |
+Three eras. The through-line is that the C backend, Polygon integration, Postgres persistence, IPC protocol, and React shell have been stable since day one. The *thing being computed* has changed twice.
 
-### Existing files modified
+### Era 1 (2026-04, "LLM ensemble")
 
-- `db.h` / `db.c` — added `db_get_conn()` accessor + new schema (bot_runs,
-  bot_picks, backtest_results)
-- `ipc_server.c` — unrecognized commands now fall through to
-  `ipc_research_dispatch()`. Legacy portfolio/alert handlers untouched.
-- `main.c` — db_init + ipc_research_init/cleanup + db_close on shutdown
-- `market_data.h` — `MAX_SYMBOLS` 64 → 600 for the S&P 500 universe
-- `Makefile` — new sources added to SRCS, `-lm` linker flag
+**Thesis.** If 500 persona-diverse LLM analyst bots each independently pick a small basket from the S&P 500 universe, hash-count the picks, and take the top-K by vote share, the consensus should beat naive index selection. The pitch was "wisdom of the LLM crowd, priced against a real backtester."
 
-## ⚠️ YOUR TURN — three files to write yourself
+**What was built.**
+- C: `aggregation.c` (FNV-1a hash + open-addressed top-K), `backtest.c` (equal-weight, Sharpe, DD, hit rate, alpha vs SPY), `convergence.c` (Jaccard stability to decide when adding more bots stops changing consensus), `bot_picks.c` (Postgres CRUD for runs/picks), `sp500_universe.c`.
+- Python `bots/`: `bot_runner.py` (persona bots against Anthropic Haiku, later swapped to a local vLLM server serving Qwen 2.5 14B AWQ once the API cost became untenable), `kseed_runner.py` (K parallel ensembles with cross-ensemble disagreement variance), `bot_runner_backtest.py` (historical-window variant with cached OHLCV), `backfill.py`.
+- Frontend: `CompilationPanel`, `PortfolioPanel`, `AlertPanel`, `TradeBlotter`, `QuotePanel`, `ResearchPanel`, `RiskPanel`, `PaperTrailPanel`.
 
-These are deliberately stubs. Each `.c` file has detailed comment-pointers
-explaining the design — read them top to bottom before you start coding.
+**Why it fell short.**
+1. *LLM training-cutoff leakage.* The model "knows" what happened to a ticker even when you tell it the date is earlier. Honest backtests were confined to the sliver of time after the model's training cutoff, which shrank the usable evaluation window.
+2. *No hard quantitative content.* For a quant internship resume artifact the story was "I called an LLM in a loop." The math surface area was FNV hashing and Sharpe ratios. Fine engineering, weak signal to a quant recruiter.
+3. *Consensus was noisier than expected.* Even with `kseed_runner` and cross-ensemble disagreement scoring, top-K rankings were dominated by mega-caps the model saw every day. The convergence detector fired quickly but the converged set was uninteresting.
 
-### 1. `backend/src/aggregation.c` (~200 lines)
+### Era 2 (2026-06 through 2026-08-17, "Heston risk overlay")
 
-The hash map at the heart of the bot ensemble. FNV-1a hash + open
-addressing + linear probing. The pointer comments walk you through every
-decision.
+**Thesis.** Keep the LLM ensemble, but downweight its picks by a stochastic-vol risk score so overcrowded / high-vol names don't dominate. This is where the quant substance entered.
 
-**Test plan**: write a `agg_test.c` scratch file that adds 50 picks for
-"AAPL", 30 for "MSFT", 10 for "GOOG", calls `agg_top_k(_, _, 3)`, and
-asserts the order. ~30 lines, run in 5 minutes.
+**What was added.**
+- `heston.c`: Bates/Heston SV Monte Carlo path generator with the standard SV dynamics (`dS = μ S dt + √v S dW^S`, `dv = κ(θ - v) dt + σ √v dW^v`, `⟨dW^S, dW^v⟩ = ρ dt`).
+- `heston_surface.c`: implied-vol surface fit / lookup.
+- `risk_score.c`: per-symbol scalar collapsed from the MC path bundle.
+- `rebalance.c`: combined the blended ranking (LLM vote share × risk score) with current holdings, GICS sector diversity, and the risk scalar to emit a concrete trade list.
+- Frontend: `MCPathBundlePanel`, `HestonSurfacePanel`, `HestonDiagnosticsPanel`, `TickEvaluationPanel` as the per-symbol host.
 
-### 2. `backend/src/backtest.c` (~250 lines)
+**Why it still fell short.**
+The Heston layer was doing real math, but structurally the LLM was still the primary signal and the SV model was a filter on top. The pipeline was two loosely-coupled halves. When explaining it, the LLM half undercut the quant half ("so the model that picks stocks is Qwen 14B, and then...").
 
-Equal-weighted backtest using `db_cache_load()` for price lookups. Computes
-total return, Sharpe (annualized), max drawdown, hit rate, alpha vs SPY.
-Pointer comments cover edge cases.
+### Era 3 (2026-08-18 onward, "Pure Bates + news-driven jumps")
 
-**Test plan**: backfill 5 well-known tickers + SPY for ~Aug-Dec 2025 via
-the existing `polygon_rest` path, then call `backtest_run` and sanity-check
-against Yahoo Finance. **Do this BEFORE wiring up bots** — you need a
-known-good ground truth.
+**Thesis.** Drop the LLM stock-picker entirely. The signal is the *option itself*: calibrate Bates, price the whole grid, compare to a synthesized market IV, and rank by Q-vs-P edge. News becomes an input to the jump parameters, not a text prompt to an LLM.
 
-### 3. `backend/src/convergence.c` (~30 lines real code)
+**What changed on 2026-08-18.**
+- **Deleted.** `aggregation.c/h`, `backtest.c/h`, `bot_picks.c/h`, `convergence.c/h`, `rebalance.c/h`, `risk_score.c/h`, entire `bots/` directory (bot_runner, kseed_runner, backfill, requirements), frontend panels tied to the ensemble (CompilationPanel, PortfolioPanel, AlertPanel, TradeBlotter, QuotePanel, ResearchPanel, RiskPanel, PaperTrailPanel).
+- **Added.** `bates_backtest.c/h` (grid pricer via Lewis (2001) Fourier integral against the Bates CF + daily-rebalanced delta hedge simulator), `news_jump.c/h` (crawler rollup into per-symbol `(lam_bump, mu_j_bias, sigma_j_bump)` and an `apply()` that mutates a calibrated `HestonParams` in place), `option_score.c/h` (z-score fusion producing the final ranking), `BatesBacktestPanel.tsx`, `NewsJumpPanel.tsx`, `OptionRankingPanel.tsx`.
+- **Kept.** All Polygon integration, Postgres, IPC, the Heston MC and surface code, and the Tick Evaluation host panel with its MC / surface / diagnostics children.
+- **Kept but demoted.** Optional local-vLLM sentiment layer, gated behind `QUORUM_NEWS_LLM=1`. It contributes `+0.03 * sentiment` to `mu_j_bias` on top of the keyword result; the keyword-derived `event_class` stays authoritative. The LLM went from "the picker" to "a small adjustment to one jump parameter, off by default."
 
-Just two functions, one is a one-liner. Don't overthink it.
-
-**Test plan**: Two AggResult arrays, eyeball the Jaccard ratio.
+**Why this is the right story.** The pipeline now has a coherent single thesis: "market-maker-style Q-vs-P option ranking, with news as a jump-parameter overlay." Every component contributes math. The interview pitch is "I built a Bates calibrator, a Lewis Fourier pricer, a delta-hedge P&L simulator, and a cross-sectional z-score fusion, wired to a live news feed."
 
 ---
 
-## What you'll need to set up before this builds
+## Decisions log
 
-```bash
-# Postgres (if not already)
-brew install postgresql@17
-brew services start postgresql@17
-createdb stockapp
+- **2026-04-07.** Chose C for the analytics core and TypeScript/Python for orchestration. Rationale: C gives a strong systems story for a resume; TS/Python own the HTTP/LLM/concurrency work. *Still valid in Era 3 (the Python layer is gone but the C/JS/TS split remains).*
+- **2026-04-07.** Universe = S&P 500 (current snapshot). Smaller universes too narrow; broader universes need liquidity filters and more data infrastructure than v1 justifies. *Still valid.*
+- **2026-04-07.** Aggregator re-runs on every `aggregate_run` IPC call rather than maintaining live in-memory state. *Superseded 2026-08-18: aggregator deleted.*
+- **2026-06.** Added Heston MC + IV surface + per-symbol risk score. Rationale: raise the quant surface area of the project before internship applications open.
+- **2026-08-15.** Realized the LLM half was undercutting the quant half in every explanation. Started scoping the pivot.
+- **2026-08-18.** Pivot committed. Removed LLM ensemble, aggregation, convergence, rebalance, risk_score, and the Python `bots/` tree. Added Bates backtest grid, news-jump overlay, and option-score fusion. The project is now pure Bates + news-driven jumps + option ranking.
+- **2026-08-19.** SEC/EDGAR treated as permanently off-limits after an IP ban two months prior. All news must come through Polygon or a licensed vendor; no scraping.
+- **2026-08-20.** README rewritten around the Q-vs-P framing (`bates_backtest` + `option_score`). Kept the E\*TRADE key slots in `.env` for future live execution but the code path is not wired.
+- *(next decision here)*
 
-# Build
-cd backend
-make
-./quorum-backend YOUR_POLYGON_API_KEY
+---
+
+## Honest limitations (current)
+
+- **Option data is synthesized.** `market_iv = model_iv + N(0, noise_sigma_vol) + skew(K/S, T)`, deterministic per `(run_id, symbol, K, T)`. This is a math sanity check for the pipeline, not a live trading number. For a fair edge, `E[hedged P&L] ≈ 0.5 * Γ * S² * (σ_impl² - σ_realized²) * Δt` and the sign of `edge_vol_pts` should predict the sign of the P&L. Wiring a real option chain (E\*TRADE, Polygon options) is the next real-money step.
+- **Survivorship bias.** The S&P 500 list is the *current* snapshot, not point-in-time.
+- **Heston/Bates calibration** uses a bounded parameter search, not a full-optimizer surface fit. Fine for ranking, not production-grade for exotics.
+- **News-jump keyword mapping is hand-tuned.** `news_jump.c` uses a small keyword table with priorities. Optional local-vLLM sentiment gated behind `QUORUM_NEWS_LLM=1`.
+- **Transaction cost / bid-ask / market impact** are not modeled in the hedged-P&L path.
+- **Risk-free rate** is a single scalar passed at run start.
+
+These are *features* in the interview pitch, not bugs. They show awareness of what naive backtesting gets wrong.
+
+---
+
+## Prior plans (archived)
+
+Kept for context on how the project used to be scoped. Everything in this section describes the Era 1 and Era 2 build and is no longer live.
+
+### Era 1 architecture diagram (as it was in April 2026)
+
+```
+┌──────────────────┐    HTTP/WS    ┌─────────────────────┐
+│  React frontend  │◄──────────────►  bridge (Node)      │
+│  (sliders, UI)   │                │  (existing)         │
+└──────────────────┘                └─────────┬───────────┘
+                                              │ TCP 8765
+┌──────────────────┐                          ▼
+│  TS bot system   │  TCP 8765    ┌─────────────────────┐
+│  (Pass 2)        │◄────────────►│  C backend           │
+│  - crawler       │              │  - aggregation.c    │
+│  - personas      │              │  - backtest.c       │
+│  - orchestrator  │              │  - convergence.c    │
+│  - budget cap    │              │  - bot_picks.c (DB) │
+└──────────────────┘              └─────────────────────┘
 ```
 
-The build will succeed even with empty stub bodies — they return safe
-defaults. The IPC commands will work end-to-end except they'll return
-empty/zero results until you fill in the algos.
+### Era 1 pass plan
 
-## How to test the IPC layer manually
+- **Pass 1.** C stubs (`aggregation`, `backtest`, `convergence`, `bot_picks`, `sp500_universe`, `ipc_research`). Done April 2026.
+- **Pass 2.** TypeScript bot system: Anthropic Haiku client with prompt caching, persistent monthly $50 budget cap, 20 personas, `p-limit` concurrency, IPC streaming. *Later replaced with Python + local vLLM after cost pressure. Removed entirely 2026-08-18.*
+- **Pass 3.** Crawler pre-summarizing news/sector context, prompt-cached so 500 bots reuse the same base context for ~10x savings. *Crawler survived; the prompt-caching path is gone. News now feeds `news_jump.c`, not an LLM prompt.*
+- **Pass 4.** Frontend wiring: sliders for `hold_days`, "run backtest" button, top-20 consensus display, run history. *Panels deleted 2026-08-18 and replaced with `OptionRankingPanel`, `BatesBacktestPanel`, `NewsJumpPanel`.*
 
-```bash
-# In one terminal:
-./backend/quorum-backend YOUR_POLYGON_KEY
+### Era 2 additions (Heston risk overlay)
 
-# In another:
-nc localhost 8765
-{"cmd":"sp500_list"}
-# → {"type":"sp500_list","tickers":["A","AAL",...]}
+- `heston.c/h`, `heston_surface.c/h`, `risk_score.c/h`, `rebalance.c/h`.
+- IPC commands `heston_score_run`, `ranking_blend`, `rebalance_check`, `rebalance_resolve`. *All deleted 2026-08-18 except the Heston MC / surface / diagnostics commands, which survive under `bates_backtest_run` / `option_ranking_blend` / `heston_*` today.*
 
-{"cmd":"bot_run_create","label":"manual-test","n_bots_target":2,"hold_days":30}
-# → {"type":"bot_run_created","run_id":1}
+### Era 1 limitations (for reference; several are now moot)
 
-{"cmd":"bot_picks_ingest","run_id":1,"bot_index":0,"persona":"value","picks":["AAPL","MSFT","NVDA"]}
-# → {"type":"bot_picks_ack","run_id":1,"bot_index":0,"n":3,"n_dropped":0}
-
-{"cmd":"bot_picks_ingest","run_id":1,"bot_index":1,"persona":"momentum","picks":["NVDA","TSLA"]}
-# → {"type":"bot_picks_ack",...}
-
-{"cmd":"aggregate_run","run_id":1,"k":5}
-# → empty `top` until aggregation.c is implemented; full results once it is
-```
-
-## Coming in Pass 2 — TypeScript bot system
-
-After you've written the three `.c` files, ping me to start Pass 2:
-
-- `bots/` directory at repo root
-- Anthropic Haiku 4.5 client wrapper with prompt caching
-- **Persistent monthly budget tracker — hard $50/month cap, refuses to run**
-- 20 distinct personas (value/momentum/contrarian/sector specialists/...)
-- Concurrency-controlled orchestrator (`p-limit`)
-- IPC client streaming picks to the C backend
-- CLI: `npm run bots -- --count 500 --window 30`
-
-## Coming in Pass 3 — Crawler
-
-Pre-summarized news/sector context fed to bots, using prompt caching so
-500 bots reuse the same expensive base context for ~10x cost savings.
-
-## Coming in Pass 4 — Frontend wiring
-
-Sliders for `hold_days`, "run backtest" button, top-20 consensus display,
-run history.
-
-## Honest limitations to acknowledge in your project writeup
-
-- **Survivorship bias**: the S&P 500 list is the *current* snapshot, not
-  point-in-time. Backtests crossing constituent rebalances are slightly
-  optimistic.
-- **LLM training cutoff leakage**: Claude knows what happened to Tesla in
-  2023 even if you tell it the date is 2020. Backtest only on data *after*
-  the model's training cutoff for honest results. (For Haiku 4.5 that
-  means mid-2025 onward — about 10 months of clean test data as of 2026-04.)
-- **No real news context yet** — Pass 1 bots will only see price history +
-  sector. Adding crawled news is Pass 3.
-- **Transaction cost is a flat 0.2%** — doesn't model bid-ask spread,
-  market impact, or taxes. Real returns would be lower.
-- **Risk-free rate assumed 0** in the Sharpe calc.
-
-These are *features* in your interview pitch, not bugs. They show you
-understand what could be wrong with naive backtesting — most students
-don't.
-
-## Decisions log (start filling this in!)
-
-- **2026-04-07** — Chose C for the analytics core (aggregation, backtest,
-  Postgres path) and TypeScript for the bot orchestration + crawler.
-  Rationale: C gives a strong systems story for resume, TS has the best
-  ecosystem for HTTP/LLM/concurrency work and shares types with the React
-  frontend.
-- **2026-04-07** — Universe = S&P 500 (current snapshot). Smaller
-  universes are too narrow; broader universes (Russell 1000, all US
-  equities) require liquidity filters and more data infrastructure than
-  is justified for v1.
-- **2026-04-07** — Aggregator re-runs on every `aggregate_run` IPC call
-  rather than maintaining live in-memory state. Trades a bit of CPU for
-  statelessness — multiple clients can query the same run safely, and a
-  backend restart doesn't lose progress (it's all in Postgres).
-- *(your next decision here)*
+- **LLM training-cutoff leakage.** The root cause of the pivot. No longer relevant in Era 3 because there is no LLM stock picker.
+- **No real news context** in Pass 1 bots. Resolved in Pass 3, then generalized in Era 3.
+- **Transaction cost flat 0.2%.** Still an honest limitation, but the current pipeline models delta-hedged P&L rather than a strategy return, so this specific number no longer applies.

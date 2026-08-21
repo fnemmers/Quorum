@@ -1,31 +1,21 @@
 /*
- * ipc_research.c  –  IPC handlers for the bot ensemble + backtest path.
- *
- * Owned commands (see ipc_research.h for the wire format):
- *   sp500_list
- *   bot_run_create
- *   bot_picks_ingest
- *   bot_run_finish
- *   aggregate_run
- *   backtest_run
- *
- * Each handler reads its params from the cJSON root, calls into the
- * appropriate module (bot_picks, aggregation, backtest, sp500_universe),
- * and writes a newline-terminated JSON line back to client_fd.
+ * ipc_research.c  --  Backend command handlers for the Bates + AI-jump
+ *                     project. All commands are stateless: they take
+ *                     the parameters they need (including any symbols
+ *                     universe) and compute-and-return. Only the raw
+ *                     feed layers (price_cache, news_cache,
+ *                     news_jump_signal) are persisted.
  */
 
 #include "ipc_research.h"
-#include "bot_picks.h"
-#include "aggregation.h"
-#include "backtest.h"
-#include "convergence.h"
 #include "sp500_universe.h"
 #include "crawler.h"
 #include "market_data.h"
 #include "heston.h"
 #include "heston_surface.h"
-#include "risk_score.h"
-#include "rebalance.h"
+#include "news_jump.h"
+#include "bates_backtest.h"
+#include "option_score.h"
 #include "polygon_rest.h"
 #include "db.h"
 #include "cJSON.h"
@@ -71,406 +61,6 @@ static void send_error(int fd, const char *msg) {
     cJSON_Delete(o);
 }
 
-/* ── sp500_list ─────────────────────────────────────────────────── */
-
-static void cmd_sp500_list(int fd) {
-    cJSON *o   = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "type", "sp500_list");
-    cJSON *arr = cJSON_AddArrayToObject(o, "tickers");
-
-    const char *const *list = sp500_tickers();
-    size_t n = sp500_count();
-    for (size_t i = 0; i < n; i++)
-        cJSON_AddItemToArray(arr, cJSON_CreateString(list[i]));
-
-    send_obj(fd, o);
-    cJSON_Delete(o);
-}
-
-/* ── bot_runs_list ──────────────────────────────────────────────── */
-
-static void cmd_bot_runs_list(int fd, cJSON *root) {
-    cJSON *jl = cJSON_GetObjectItemCaseSensitive(root, "limit");
-    int limit = (jl && cJSON_IsNumber(jl)) ? (int)jl->valuedouble : 50;
-    if (limit <= 0 || limit > 500) limit = 50;
-
-    BotRunInfo *rows = (BotRunInfo *)calloc((size_t)limit, sizeof(BotRunInfo));
-    if (!rows) { send_error(fd, "oom"); return; }
-
-    int n = bot_runs_list(rows, limit);
-    if (n < 0) { free(rows); send_error(fd, "bot_runs_list failed"); return; }
-
-    cJSON *o   = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "type", "bot_runs_list");
-    cJSON *arr = cJSON_AddArrayToObject(o, "runs");
-    for (int i = 0; i < n; i++) {
-        cJSON *e = cJSON_CreateObject();
-        cJSON_AddNumberToObject(e, "id",            (double)rows[i].id);
-        cJSON_AddStringToObject(e, "label",         rows[i].label);
-        cJSON_AddNumberToObject(e, "n_bots_target", rows[i].n_bots_target);
-        cJSON_AddNumberToObject(e, "n_bots_actual", rows[i].n_bots_actual);
-        cJSON_AddNumberToObject(e, "hold_days",     rows[i].hold_days);
-        cJSON_AddNumberToObject(e, "started_at",    (double)rows[i].started_at);
-        cJSON_AddNumberToObject(e, "finished_at",   (double)rows[i].finished_at);
-        cJSON_AddItemToArray(arr, e);
-    }
-    send_obj(fd, o);
-    cJSON_Delete(o);
-    free(rows);
-}
-
-/* ── bot_run_create ─────────────────────────────────────────────── */
-
-static void cmd_bot_run_create(int fd, cJSON *root) {
-    cJSON *jl = cJSON_GetObjectItemCaseSensitive(root, "label");
-    cJSON *jn = cJSON_GetObjectItemCaseSensitive(root, "n_bots_target");
-    cJSON *jh = cJSON_GetObjectItemCaseSensitive(root, "hold_days");
-
-    const char *label = (jl && cJSON_IsString(jl)) ? jl->valuestring : "unnamed";
-    int n_bots = (jn && cJSON_IsNumber(jn)) ? (int)jn->valuedouble : 0;
-    int hold   = (jh && cJSON_IsNumber(jh)) ? (int)jh->valuedouble : 30;
-
-    int64_t run_id = bot_run_create(label, n_bots, hold);
-    if (run_id < 0) {
-        send_error(fd, "bot_run_create failed");
-        return;
-    }
-
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "type", "bot_run_created");
-    cJSON_AddNumberToObject(o, "run_id", (double)run_id);
-    send_obj(fd, o);
-    cJSON_Delete(o);
-}
-
-/* ── bot_picks_ingest ───────────────────────────────────────────── */
-
-static void cmd_bot_picks_ingest(int fd, cJSON *root) {
-    cJSON *jr = cJSON_GetObjectItemCaseSensitive(root, "run_id");
-    cJSON *jb = cJSON_GetObjectItemCaseSensitive(root, "bot_index");
-    cJSON *jp = cJSON_GetObjectItemCaseSensitive(root, "persona");
-    cJSON *jx = cJSON_GetObjectItemCaseSensitive(root, "picks");
-
-    if (!jr || !cJSON_IsNumber(jr) ||
-        !jb || !cJSON_IsNumber(jb) ||
-        !jx || !cJSON_IsArray(jx)) {
-        send_error(fd, "bot_picks_ingest: missing run_id/bot_index/picks");
-        return;
-    }
-
-    int64_t run_id    = (int64_t)jr->valuedouble;
-    int     bot_index = (int)jb->valuedouble;
-    const char *persona =
-        (jp && cJSON_IsString(jp)) ? jp->valuestring : "default";
-
-    int n = cJSON_GetArraySize(jx);
-    if (n <= 0) { send_error(fd, "empty picks array"); return; }
-
-    /* Build a flat const char* array, validating each entry against
-     * the S&P 500 universe. Bots will sometimes hallucinate tickers —
-     * we silently drop those rather than fail the whole batch. */
-    const char **buf = (const char **)calloc((size_t)n, sizeof(char *));
-    if (!buf) { send_error(fd, "oom"); return; }
-
-    int kept = 0;
-    for (int i = 0; i < n; i++) {
-        cJSON *t = cJSON_GetArrayItem(jx, i);
-        if (!t || !cJSON_IsString(t)) continue;
-        if (!sp500_contains(t->valuestring)) continue;
-        buf[kept++] = t->valuestring;
-    }
-
-    int rc = (kept > 0)
-        ? bot_picks_insert_batch(run_id, bot_index, persona, buf, kept)
-        : 0;
-    free(buf);
-
-    if (rc != 0) {
-        send_error(fd, "bot_picks_insert_batch failed");
-        return;
-    }
-
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "type", "bot_picks_ack");
-    cJSON_AddNumberToObject(o, "run_id",    (double)run_id);
-    cJSON_AddNumberToObject(o, "bot_index", bot_index);
-    cJSON_AddNumberToObject(o, "n",         kept);
-    cJSON_AddNumberToObject(o, "n_dropped", n - kept);
-    send_obj(fd, o);
-    cJSON_Delete(o);
-}
-
-/* ── bot_run_finish ─────────────────────────────────────────────── */
-
-static void cmd_bot_run_finish(int fd, cJSON *root) {
-    cJSON *jr = cJSON_GetObjectItemCaseSensitive(root, "run_id");
-    cJSON *jn = cJSON_GetObjectItemCaseSensitive(root, "n_bots_actual");
-    if (!jr || !cJSON_IsNumber(jr)) {
-        send_error(fd, "bot_run_finish: missing run_id");
-        return;
-    }
-    int64_t run_id = (int64_t)jr->valuedouble;
-    int n_actual = (jn && cJSON_IsNumber(jn)) ? (int)jn->valuedouble : 0;
-
-    if (bot_run_finish(run_id, n_actual) != 0) {
-        send_error(fd, "bot_run_finish failed");
-        return;
-    }
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "type", "bot_run_finished");
-    cJSON_AddNumberToObject(o, "run_id", (double)run_id);
-    send_obj(fd, o);
-    cJSON_Delete(o);
-}
-
-/* ── aggregate_run ──────────────────────────────────────────────── */
-
-static void cmd_aggregate_run(int fd, cJSON *root) {
-    cJSON *jr = cJSON_GetObjectItemCaseSensitive(root, "run_id");
-    cJSON *jk = cJSON_GetObjectItemCaseSensitive(root, "k");
-    if (!jr || !cJSON_IsNumber(jr)) {
-        send_error(fd, "aggregate_run: missing run_id");
-        return;
-    }
-    int64_t run_id = (int64_t)jr->valuedouble;
-    int k = (jk && cJSON_IsNumber(jk)) ? (int)jk->valuedouble : 20;
-    if (k <= 0 || k > 500) k = 20;
-
-    /* Pull every pick row for this run from Postgres, feed each one into
-     * a fresh aggregator, then ask for top-K. The aggregator lives only
-     * for the duration of this call — re-aggregating on demand keeps the
-     * server stateless and lets multiple clients query the same run. */
-    enum { MAX_PICKS = 50000 };
-    char (*picks)[MAX_SYMBOL_LEN] =
-        calloc(MAX_PICKS, sizeof(*picks));
-    if (!picks) { send_error(fd, "oom"); return; }
-
-    int n = bot_picks_load_run(run_id, picks, MAX_PICKS);
-    if (n < 0) { free(picks); send_error(fd, "load_run failed"); return; }
-
-    Aggregator *agg = agg_create(2048);
-    if (!agg) { free(picks); send_error(fd, "agg_create failed"); return; }
-
-    for (int i = 0; i < n; i++)
-        agg_add_pick(agg, picks[i]);
-
-    AggResult top[500];
-    int got = agg_top_k(agg, top, k);
-
-    cJSON *o   = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "type",   "aggregate_result");
-    cJSON_AddNumberToObject(o, "run_id", (double)run_id);
-    cJSON_AddNumberToObject(o, "n_picks_total", (double)n);
-    cJSON *arr = cJSON_AddArrayToObject(o, "top");
-    for (int i = 0; i < got; i++) {
-        cJSON *e = cJSON_CreateObject();
-        cJSON_AddStringToObject(e, "symbol", top[i].symbol);
-        cJSON_AddNumberToObject(e, "count",  top[i].count);
-        cJSON_AddItemToArray(arr, e);
-    }
-    send_obj(fd, o);
-    cJSON_Delete(o);
-
-    agg_free(agg);
-    free(picks);
-}
-
-/* ── backtest_run ───────────────────────────────────────────────── */
-
-static void cmd_backtest_run(int fd, cJSON *root) {
-    cJSON *jr  = cJSON_GetObjectItemCaseSensitive(root, "run_id");
-    cJSON *jk  = cJSON_GetObjectItemCaseSensitive(root, "k");
-    cJSON *jsd = cJSON_GetObjectItemCaseSensitive(root, "start_date");
-    cJSON *jhd = cJSON_GetObjectItemCaseSensitive(root, "hold_days");
-
-    if (!jr  || !cJSON_IsNumber(jr) ||
-        !jsd || !cJSON_IsString(jsd) ||
-        !jhd || !cJSON_IsNumber(jhd)) {
-        send_error(fd, "backtest_run: need run_id, start_date, hold_days");
-        return;
-    }
-    int64_t run_id     = (int64_t)jr->valuedouble;
-    int     k          = (jk && cJSON_IsNumber(jk)) ? (int)jk->valuedouble : 20;
-    const char *start  = jsd->valuestring;
-    int     hold       = (int)jhd->valuedouble;
-
-    /* Step 1: re-aggregate the run to get the top-K consensus tickers. */
-    enum { MAX_PICKS = 50000 };
-    char (*picks)[MAX_SYMBOL_LEN] =
-        calloc(MAX_PICKS, sizeof(*picks));
-    if (!picks) { send_error(fd, "oom"); return; }
-
-    int n = bot_picks_load_run(run_id, picks, MAX_PICKS);
-    if (n < 0) { free(picks); send_error(fd, "load_run failed"); return; }
-
-    Aggregator *agg = agg_create(2048);
-    if (!agg) { free(picks); send_error(fd, "agg_create failed"); return; }
-    for (int i = 0; i < n; i++) agg_add_pick(agg, picks[i]);
-
-    AggResult top[500];
-    int got = agg_top_k(agg, top, k);
-    free(picks);
-
-    if (got <= 0) {
-        agg_free(agg);
-        send_error(fd, "no consensus picks");
-        return;
-    }
-
-    /* Step 2: build a const char *[] of ticker pointers for backtest_run. */
-    const char **tickers =
-        (const char **)calloc((size_t)got, sizeof(char *));
-    if (!tickers) { agg_free(agg); send_error(fd, "oom"); return; }
-    for (int i = 0; i < got; i++) tickers[i] = top[i].symbol;
-
-    BacktestResult res = {0};
-    int rc = backtest_run(tickers, got, start, hold, &res);
-    free(tickers);
-    agg_free(agg);
-
-    if (rc != 0) {
-        send_error(fd, "backtest_run failed (check price_cache backfill)");
-        return;
-    }
-
-    /* Step 3: persist + reply. */
-    bot_backtest_save(run_id, (const struct BacktestResult *)&res);
-
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "type",         "backtest_result");
-    cJSON_AddNumberToObject(o, "run_id",       (double)run_id);
-    cJSON_AddStringToObject(o, "start_date",   res.start_date);
-    cJSON_AddStringToObject(o, "end_date",     res.end_date);
-    cJSON_AddNumberToObject(o, "hold_days",    res.hold_days);
-    cJSON_AddNumberToObject(o, "n_used",       res.n_tickers_used);
-    cJSON_AddNumberToObject(o, "n_skipped",    res.n_skipped);
-    cJSON_AddNumberToObject(o, "port_return",  res.portfolio_return_pct);
-    cJSON_AddNumberToObject(o, "bench_return", res.benchmark_return_pct);
-    cJSON_AddNumberToObject(o, "alpha",        res.alpha_pct);
-    cJSON_AddNumberToObject(o, "sharpe",       res.sharpe_ratio);
-    cJSON_AddNumberToObject(o, "max_dd",       res.max_drawdown_pct);
-    cJSON_AddNumberToObject(o, "hit_rate",     res.hit_rate_pct);
-    send_obj(fd, o);
-    cJSON_Delete(o);
-}
-
-/* ── crawl_news ────────────────────────────────────────────────── */
-
-static void cmd_crawl_news(int fd, cJSON *root) {
-    cJSON *jl = cJSON_GetObjectItemCaseSensitive(root, "limit");
-    cJSON *jc = cJSON_GetObjectItemCaseSensitive(root, "cutoff_date");
-    int limit = (jl && cJSON_IsNumber(jl)) ? (int)jl->valuedouble : 50;
-    const char *cutoff = (jc && cJSON_IsString(jc) && jc->valuestring[0])
-        ? jc->valuestring : NULL;
-
-    int n = crawler_fetch_news(limit, cutoff);
-    if (n < 0) {
-        send_error(fd, "crawl_news failed");
-        return;
-    }
-
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "type", "crawl_done");
-    cJSON_AddNumberToObject(o, "n_fetched", limit);
-    cJSON_AddNumberToObject(o, "n_stored", n);
-    send_obj(fd, o);
-    cJSON_Delete(o);
-}
-
-/* ── get_news_digest ───────────────────────────────────────────── */
-
-static void cmd_get_news_digest(int fd, cJSON *root) {
-    cJSON *jc = cJSON_GetObjectItemCaseSensitive(root, "max_chars");
-    cJSON *jd = cJSON_GetObjectItemCaseSensitive(root, "days");
-    cJSON *ja = cJSON_GetObjectItemCaseSensitive(root, "as_of");
-    int max_chars = (jc && cJSON_IsNumber(jc)) ? (int)jc->valuedouble : 32000;
-    int days      = (jd && cJSON_IsNumber(jd)) ? (int)jd->valuedouble : 7;
-    const char *as_of = (ja && cJSON_IsString(ja) && ja->valuestring[0])
-        ? ja->valuestring : NULL;
-
-    char *digest = crawler_build_digest(max_chars, days, as_of);
-    if (!digest) {
-        send_error(fd, "build_digest failed");
-        return;
-    }
-
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "type", "news_digest");
-    cJSON_AddStringToObject(o, "digest", digest);
-    send_obj(fd, o);
-    cJSON_Delete(o);
-    free(digest);
-}
-
-/* ── Helpers shared by heston/ranking/rebalance commands ────────── */
-
-/*
- * Re-aggregate a run and write top-K into `top`. Returns the number of
- * entries written, or <0 on error. Allocates internally.
- */
-static int load_top_k_for_run(long long run_id, int k, AggResult *top) {
-    enum { MAX_PICKS = 50000 };
-    char (*picks)[MAX_SYMBOL_LEN] = calloc(MAX_PICKS, sizeof(*picks));
-    if (!picks) return -1;
-
-    int n = bot_picks_load_run(run_id, picks, MAX_PICKS);
-    if (n < 0) { free(picks); return -1; }
-
-    Aggregator *agg = agg_create(2048);
-    if (!agg) { free(picks); return -1; }
-    for (int i = 0; i < n; i++) agg_add_pick(agg, picks[i]);
-
-    int got = agg_top_k(agg, top, k);
-    agg_free(agg);
-    free(picks);
-    return got;
-}
-
-/*
- * For each ticker in top, load ~180 daily bars from price_cache,
- * calibrate Heston params, run MC, write to heston_scores DB and
- * fill `out[i]`. Tickers without sufficient price history get a
- * zeroed HestonScore (caller should filter or de-weight them).
- *
- * horizon_days controls T and step count (e.g. 21 for ~3 weeks).
- */
-static int compute_heston_for_top(long long run_id,
-                                  const AggResult *top, int n,
-                                  int horizon_days,
-                                  HestonScore *out) {
-    int64_t now    = (int64_t)time(NULL) * 1000LL;
-    int64_t lookback = now - 180LL * 86400LL * 1000LL;
-
-    for (int i = 0; i < n; i++) {
-        memset(&out[i], 0, sizeof(out[i]));
-        strncpy(out[i].symbol, top[i].symbol, MAX_SYMBOL_LEN - 1);
-
-        OHLCBar bars[256];
-        int n_bars = db_cache_load(top[i].symbol, "day",
-                                   lookback, now, bars, 256);
-        if (n_bars < 30) continue;   /* not enough history - leave zeroed */
-
-        HestonParams hp;
-        if (heston_calibrate_from_history(bars, n_bars,
-                                          (double)horizon_days / 252.0,
-                                          horizon_days, &hp) != 0)
-            continue;
-
-        /* Per-ticker seed - deterministic given (run_id, symbol). */
-        uint64_t seed = (uint64_t)run_id ^ 0x9E3779B97F4A7C15ULL;
-        for (const char *c = top[i].symbol; *c; c++) seed = seed * 131 + (uint8_t)*c;
-
-        if (heston_run(&hp, &out[i], 5000, 100000, 0.005, seed) != 0)
-            continue;
-
-        db_heston_save(run_id, out[i].symbol,
-                       out[i].expected_return, out[i].forward_vol,
-                       out[i].es_95, out[i].prob_loss_5,
-                       out[i].n_paths_used, out[i].converged);
-    }
-    return 0;
-}
-
 /* Format a Unix-ms timestamp as YYYY-MM-DD (UTC). buf must be >= 11 bytes. */
 static void format_ymd_utc(int64_t ms, char *buf) {
     time_t secs = (time_t)(ms / 1000LL);
@@ -488,9 +78,7 @@ static void format_ymd_utc(int64_t ms, char *buf) {
  * covering the last `lookback_days`. If not, synchronously fetch from
  * Polygon and store. Returns the bar count after the fetch attempt.
  *
- * Use sparingly — Polygon free tier is 5 req/min, so calling this for
- * many symbols in a tight loop will rate-limit. Single-symbol viewer
- * triggers (heston_surface, heston_path_bundle) are fine.
+ * Polygon free tier is 5 req/min — call sparingly.
  */
 static int ensure_daily_history(const char *symbol, int lookback_days,
                                 int min_bars) {
@@ -524,331 +112,71 @@ static int ensure_daily_history(const char *symbol, int lookback_days,
     return db_cache_load(symbol, "day", lookms, now, bars, 256);
 }
 
-/* Look up a disagreement variance from the optional JSON map. */
-static double disagreement_for(cJSON *map, const char *symbol) {
-    if (!map || !cJSON_IsObject(map)) return 0.0;
-    cJSON *v = cJSON_GetObjectItemCaseSensitive(map, symbol);
-    if (v && cJSON_IsNumber(v)) {
-        double d = v->valuedouble;
-        if (d < 0.0) d = 0.0;
-        if (d > 1.0) d = 1.0;
-        return d;
-    }
-    return 0.0;
-}
+/* ── sp500_list ─────────────────────────────────────────────────── */
 
-/* ── heston_score_run ──────────────────────────────────────────── */
+static void cmd_sp500_list(int fd) {
+    cJSON *o   = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "type", "sp500_list");
+    cJSON *arr = cJSON_AddArrayToObject(o, "tickers");
 
-static void cmd_heston_score_run(int fd, cJSON *root) {
-    cJSON *jr = cJSON_GetObjectItemCaseSensitive(root, "run_id");
-    cJSON *jk = cJSON_GetObjectItemCaseSensitive(root, "k");
-    cJSON *jh = cJSON_GetObjectItemCaseSensitive(root, "horizon_days");
-
-    if (!jr || !cJSON_IsNumber(jr)) {
-        send_error(fd, "heston_score_run: missing run_id");
-        return;
-    }
-    long long run_id = (long long)jr->valuedouble;
-    int k = (jk && cJSON_IsNumber(jk)) ? (int)jk->valuedouble : 20;
-    int horizon = (jh && cJSON_IsNumber(jh)) ? (int)jh->valuedouble : 21;
-    if (k <= 0 || k > 500) k = 20;
-    if (horizon <= 0 || horizon > 252) horizon = 21;
-
-    AggResult top[500];
-    int n = load_top_k_for_run(run_id, k, top);
-    if (n <= 0) { send_error(fd, "no consensus picks for run"); return; }
-
-    HestonScore *scores = calloc((size_t)n, sizeof(HestonScore));
-    if (!scores) { send_error(fd, "oom"); return; }
-
-    compute_heston_for_top(run_id, top, n, horizon, scores);
-
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "type", "heston_scored");
-    cJSON_AddNumberToObject(o, "run_id", (double)run_id);
-    cJSON_AddNumberToObject(o, "horizon_days", horizon);
-    cJSON *arr = cJSON_AddArrayToObject(o, "scores");
-    for (int i = 0; i < n; i++) {
-        cJSON *e = cJSON_CreateObject();
-        cJSON_AddStringToObject(e, "symbol",          scores[i].symbol);
-        cJSON_AddNumberToObject(e, "expected_return", scores[i].expected_return);
-        cJSON_AddNumberToObject(e, "forward_vol",     scores[i].forward_vol);
-        cJSON_AddNumberToObject(e, "es_95",           scores[i].es_95);
-        cJSON_AddNumberToObject(e, "prob_loss_5",     scores[i].prob_loss_5);
-        cJSON_AddNumberToObject(e, "n_paths_used",    scores[i].n_paths_used);
-        cJSON_AddBoolToObject  (e, "converged",       scores[i].converged);
-        cJSON_AddItemToArray(arr, e);
-    }
-    send_obj(fd, o);
-    cJSON_Delete(o);
-    free(scores);
-}
-
-/* ── ranking_blend ──────────────────────────────────────────────── */
-/*
- * {"cmd":"ranking_blend","run_id":42,"k":20,
- *  "horizon_days":21,
- *  "disagreement":{"AAPL":0.12,"NVDA":0.4, ...},
- *  "w_bot":0.6,"w_heston":0.4}
- *
- * Re-aggregates, runs (or reuses) Heston, builds the ScoredResult[]
- * sorted desc by blended_score. Returns the ranked array plus the
- * sigma_blend (sample stdev of blended scores) so callers can cache
- * it for rebalance evaluation.
- */
-static void cmd_ranking_blend(int fd, cJSON *root) {
-    cJSON *jr = cJSON_GetObjectItemCaseSensitive(root, "run_id");
-    cJSON *jk = cJSON_GetObjectItemCaseSensitive(root, "k");
-    cJSON *jh = cJSON_GetObjectItemCaseSensitive(root, "horizon_days");
-    cJSON *jd = cJSON_GetObjectItemCaseSensitive(root, "disagreement");
-    cJSON *jwb = cJSON_GetObjectItemCaseSensitive(root, "w_bot");
-    cJSON *jwh = cJSON_GetObjectItemCaseSensitive(root, "w_heston");
-
-    if (!jr || !cJSON_IsNumber(jr)) {
-        send_error(fd, "ranking_blend: missing run_id");
-        return;
-    }
-    long long run_id = (long long)jr->valuedouble;
-    int k = (jk && cJSON_IsNumber(jk)) ? (int)jk->valuedouble : 20;
-    int horizon = (jh && cJSON_IsNumber(jh)) ? (int)jh->valuedouble : 21;
-    if (k <= 0 || k > 500) k = 20;
-
-    AggResult top[500];
-    int n = load_top_k_for_run(run_id, k, top);
-    if (n <= 0) { send_error(fd, "no consensus picks for run"); return; }
-
-    HestonScore *scores = calloc((size_t)n, sizeof(HestonScore));
-    double      *dis    = calloc((size_t)n, sizeof(double));
-    ScoredResult *ranked = calloc((size_t)n, sizeof(ScoredResult));
-    if (!scores || !dis || !ranked) {
-        free(scores); free(dis); free(ranked);
-        send_error(fd, "oom");
-        return;
-    }
-
-    compute_heston_for_top(run_id, top, n, horizon, scores);
-    for (int i = 0; i < n; i++) dis[i] = disagreement_for(jd, top[i].symbol);
-
-    RiskWeights w = risk_weights_default();
-    if (jwb && cJSON_IsNumber(jwb)) w.w_bot    = jwb->valuedouble;
-    if (jwh && cJSON_IsNumber(jwh)) w.w_heston = jwh->valuedouble;
-
-    if (risk_score_build(top, scores, dis, n, w, ranked) != 0) {
-        free(scores); free(dis); free(ranked);
-        send_error(fd, "risk_score_build failed");
-        return;
-    }
-    risk_score_sort(ranked, n);
-
-    /* Compute sigma_blend (sample stdev) for the caller to cache. */
-    double mean = 0.0;
-    for (int i = 0; i < n; i++) mean += ranked[i].blended_score;
-    mean /= (double)n;
-    double var = 0.0;
-    for (int i = 0; i < n; i++) {
-        double d = ranked[i].blended_score - mean;
-        var += d * d;
-    }
-    var /= (double)(n > 1 ? n - 1 : 1);
-    double sigma = sqrt(var);
-
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "type", "ranking_blended");
-    cJSON_AddNumberToObject(o, "run_id",       (double)run_id);
-    cJSON_AddNumberToObject(o, "sigma_blend",  sigma);
-    cJSON_AddNumberToObject(o, "w_bot",        w.w_bot);
-    cJSON_AddNumberToObject(o, "w_heston",     w.w_heston);
-    cJSON *arr = cJSON_AddArrayToObject(o, "ranked");
-    for (int i = 0; i < n; i++) {
-        cJSON *e = cJSON_CreateObject();
-        cJSON_AddStringToObject(e, "symbol",          ranked[i].symbol);
-        cJSON_AddNumberToObject(e, "rank",            i + 1);
-        cJSON_AddNumberToObject(e, "blended_score",   ranked[i].blended_score);
-        cJSON_AddNumberToObject(e, "z_bot",           ranked[i].z_bot);
-        cJSON_AddNumberToObject(e, "z_heston",        ranked[i].z_heston);
-        cJSON_AddNumberToObject(e, "bot_count",       ranked[i].bot_count);
-        cJSON_AddNumberToObject(e, "bot_disagreement",ranked[i].bot_disagreement);
-        cJSON_AddNumberToObject(e, "expected_return", ranked[i].heston_expected_ret);
-        cJSON_AddNumberToObject(e, "forward_vol",     ranked[i].heston_forward_vol);
-        cJSON_AddNumberToObject(e, "es_95",           ranked[i].heston_es_95);
-        cJSON_AddNumberToObject(e, "prob_loss",       ranked[i].heston_prob_loss);
-        cJSON_AddItemToArray(arr, e);
-    }
-    send_obj(fd, o);
-    cJSON_Delete(o);
-
-    free(scores);
-    free(dis);
-    free(ranked);
-}
-
-/* ── rebalance_check ───────────────────────────────────────────── */
-/*
- * {"cmd":"rebalance_check","run_id":42,"k":20,"horizon_days":21,
- *  "disagreement":{...},
- *  "holdings":[{"symbol":"AAPL","old_blend":1.2,"days_held":4,
- *               "intended_hold_days":21}, ...],
- *  "exit_rank_band":40,    // exit threshold = score at rank 2*k
- *  "es_risk_limit":-0.10}
- *
- * For each holding, evaluates obscurity-routed decision and writes
- * to rebalance_events. AUTO decisions are pre-resolved with
- * action_taken=suggested_action so the audit log is complete.
- */
-static void cmd_rebalance_check(int fd, cJSON *root) {
-    cJSON *jr  = cJSON_GetObjectItemCaseSensitive(root, "run_id");
-    cJSON *jk  = cJSON_GetObjectItemCaseSensitive(root, "k");
-    cJSON *jh  = cJSON_GetObjectItemCaseSensitive(root, "horizon_days");
-    cJSON *jd  = cJSON_GetObjectItemCaseSensitive(root, "disagreement");
-    cJSON *jpf = cJSON_GetObjectItemCaseSensitive(root, "holdings");
-    cJSON *jeb = cJSON_GetObjectItemCaseSensitive(root, "exit_rank_band");
-    cJSON *jrl = cJSON_GetObjectItemCaseSensitive(root, "es_risk_limit");
-
-    if (!jr || !cJSON_IsNumber(jr) ||
-        !jpf || !cJSON_IsArray(jpf)) {
-        send_error(fd, "rebalance_check: need run_id and holdings");
-        return;
-    }
-    long long run_id = (long long)jr->valuedouble;
-    int k = (jk && cJSON_IsNumber(jk)) ? (int)jk->valuedouble : 20;
-    int horizon = (jh && cJSON_IsNumber(jh)) ? (int)jh->valuedouble : 21;
-    int exit_band = (jeb && cJSON_IsNumber(jeb)) ? (int)jeb->valuedouble : 2 * k;
-    if (k <= 0 || k > 500) k = 20;
-
-    int eval_k = exit_band > k ? exit_band : k;
-    if (eval_k > 500) eval_k = 500;
-
-    AggResult top[500];
-    int n = load_top_k_for_run(run_id, eval_k, top);
-    if (n <= 0) { send_error(fd, "no consensus picks for run"); return; }
-
-    HestonScore  *scores = calloc((size_t)n, sizeof(HestonScore));
-    double       *dis    = calloc((size_t)n, sizeof(double));
-    ScoredResult *ranked = calloc((size_t)n, sizeof(ScoredResult));
-    if (!scores || !dis || !ranked) {
-        free(scores); free(dis); free(ranked);
-        send_error(fd, "oom"); return;
-    }
-
-    compute_heston_for_top(run_id, top, n, horizon, scores);
-    for (int i = 0; i < n; i++) dis[i] = disagreement_for(jd, top[i].symbol);
-
-    RiskWeights w = risk_weights_default();
-    if (risk_score_build(top, scores, dis, n, w, ranked) != 0) {
-        free(scores); free(dis); free(ranked);
-        send_error(fd, "risk_score_build failed"); return;
-    }
-    risk_score_sort(ranked, n);
-
-    /* sigma_blend across the evaluation universe. */
-    double mean = 0.0;
-    for (int i = 0; i < n; i++) mean += ranked[i].blended_score;
-    mean /= (double)n;
-    double var = 0.0;
-    for (int i = 0; i < n; i++) {
-        double d = ranked[i].blended_score - mean;
-        var += d * d;
-    }
-    var /= (double)(n > 1 ? n - 1 : 1);
-
-    RebalanceParams rp = rebalance_params_default();
-    rp.sigma_blend = sqrt(var);
-    if (jrl && cJSON_IsNumber(jrl)) rp.es_risk_limit = jrl->valuedouble;
-
-    /* Exit threshold = score at rank `exit_band` (just past the trade
-     * band). Anything below this is a candidate for sell/trim. */
-    int exit_idx = exit_band - 1;
-    if (exit_idx >= n) exit_idx = n - 1;
-    double exit_threshold = ranked[exit_idx].blended_score;
-
-    /* ── Iterate holdings, evaluate, persist, collect for reply. ── */
-
-    cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "type", "rebalance_check");
-    cJSON_AddNumberToObject(o, "run_id",         (double)run_id);
-    cJSON_AddNumberToObject(o, "sigma_blend",    rp.sigma_blend);
-    cJSON_AddNumberToObject(o, "exit_threshold", exit_threshold);
-    cJSON *out_arr = cJSON_AddArrayToObject(o, "events");
-
-    int n_holdings = cJSON_GetArraySize(jpf);
-    for (int i = 0; i < n_holdings; i++) {
-        cJSON *h = cJSON_GetArrayItem(jpf, i);
-        if (!h || !cJSON_IsObject(h)) continue;
-
-        cJSON *jsym  = cJSON_GetObjectItemCaseSensitive(h, "symbol");
-        cJSON *jold  = cJSON_GetObjectItemCaseSensitive(h, "old_blend");
-        cJSON *jdh   = cJSON_GetObjectItemCaseSensitive(h, "days_held");
-        cJSON *jih   = cJSON_GetObjectItemCaseSensitive(h, "intended_hold_days");
-        if (!jsym || !cJSON_IsString(jsym)) continue;
-
-        double old_blend = (jold && cJSON_IsNumber(jold)) ? jold->valuedouble : 0.0;
-        int    days_held = (jdh  && cJSON_IsNumber(jdh))  ? (int)jdh->valuedouble : 0;
-        int    hold_tgt  = (jih  && cJSON_IsNumber(jih))  ? (int)jih->valuedouble : 21;
-
-        RebalanceEvent ev;
-        if (rebalance_evaluate(jsym->valuestring, ranked, n,
-                               old_blend, exit_threshold,
-                               days_held, hold_tgt, rp, &ev) != 0) {
-            continue;   /* symbol not in evaluation universe */
-        }
-
-        const char *dec_str  = (ev.decision == REBAL_AUTO_EXECUTE) ? "auto"
-                            : (ev.decision == REBAL_AUTO_NOTIFY)   ? "notify"
-                            : (ev.decision == REBAL_ESCALATE)      ? "escalate"
-                            :                                         "hold";
-        const char *act_str  = (ev.suggested_action == REBAL_ACTION_SELL) ? "sell"
-                            : (ev.suggested_action == REBAL_ACTION_TRIM) ? "trim"
-                            : (ev.suggested_action == REBAL_ACTION_FLIP) ? "flip"
-                            :                                              "none";
-
-        const char *taken = (ev.decision == REBAL_AUTO_EXECUTE) ? act_str : NULL;
-
-        long long event_id = db_rebalance_save(
-            ev.symbol, dec_str, act_str, taken,
-            ev.old_blended_score, ev.new_blended_score, ev.exit_threshold,
-            ev.obscurity.obscurity, ev.obscurity.clarity,
-            ev.obscurity.primary_driver,
-            ev.obscurity.score_gap_clarity, ev.obscurity.llm_agreement,
-            ev.obscurity.heston_breach,    ev.obscurity.horizon_maturity,
-            ev.days_held, ev.intended_hold_days, ev.debrief);
-
-        cJSON *e = cJSON_CreateObject();
-        cJSON_AddNumberToObject(e, "event_id",          (double)event_id);
-        cJSON_AddStringToObject(e, "symbol",            ev.symbol);
-        cJSON_AddStringToObject(e, "decision",          dec_str);
-        cJSON_AddStringToObject(e, "suggested_action",  act_str);
-        cJSON_AddNumberToObject(e, "old_blend",         ev.old_blended_score);
-        cJSON_AddNumberToObject(e, "new_blend",         ev.new_blended_score);
-        cJSON_AddNumberToObject(e, "exit_threshold",    ev.exit_threshold);
-        cJSON_AddNumberToObject(e, "obscurity",         ev.obscurity.obscurity);
-        cJSON_AddNumberToObject(e, "clarity",           ev.obscurity.clarity);
-        cJSON_AddStringToObject(e, "primary_driver",    ev.obscurity.primary_driver);
-        cJSON_AddNumberToObject(e, "score_gap_clarity", ev.obscurity.score_gap_clarity);
-        cJSON_AddNumberToObject(e, "llm_agreement",     ev.obscurity.llm_agreement);
-        cJSON_AddNumberToObject(e, "heston_breach",     ev.obscurity.heston_breach);
-        cJSON_AddNumberToObject(e, "horizon_maturity",  ev.obscurity.horizon_maturity);
-        cJSON_AddNumberToObject(e, "days_held",         ev.days_held);
-        cJSON_AddNumberToObject(e, "intended_hold_days",ev.intended_hold_days);
-        cJSON_AddStringToObject(e, "debrief",           ev.debrief);
-        cJSON_AddItemToArray(out_arr, e);
-    }
+    const char *const *list = sp500_tickers();
+    size_t n = sp500_count();
+    for (size_t i = 0; i < n; i++)
+        cJSON_AddItemToArray(arr, cJSON_CreateString(list[i]));
 
     send_obj(fd, o);
     cJSON_Delete(o);
-
-    free(scores);
-    free(dis);
-    free(ranked);
 }
 
-/* ── heston_path_bundle ────────────────────────────────────────── */
-/*
- * {"cmd":"heston_path_bundle","symbol":"NVDA",
- *  "horizon_days":21,"n_paths":5000,"n_buckets":100}
- *
- * Calibrates Heston from the last 6mo of daily closes, runs N_paths,
- * returns a density grid + quantile lines for the front-end MC viewer.
- */
+/* ── crawl_news / get_news_digest ───────────────────────────────── */
+
+static void cmd_crawl_news(int fd, cJSON *root) {
+    cJSON *jl = cJSON_GetObjectItemCaseSensitive(root, "limit");
+    cJSON *jc = cJSON_GetObjectItemCaseSensitive(root, "cutoff_date");
+    int limit = (jl && cJSON_IsNumber(jl)) ? (int)jl->valuedouble : 50;
+    const char *cutoff = (jc && cJSON_IsString(jc) && jc->valuestring[0])
+        ? jc->valuestring : NULL;
+
+    int n = crawler_fetch_news(limit, cutoff);
+    if (n < 0) {
+        send_error(fd, "crawl_news failed");
+        return;
+    }
+
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "type", "crawl_done");
+    cJSON_AddNumberToObject(o, "n_fetched", limit);
+    cJSON_AddNumberToObject(o, "n_stored", n);
+    send_obj(fd, o);
+    cJSON_Delete(o);
+}
+
+static void cmd_get_news_digest(int fd, cJSON *root) {
+    cJSON *jc = cJSON_GetObjectItemCaseSensitive(root, "max_chars");
+    cJSON *jd = cJSON_GetObjectItemCaseSensitive(root, "days");
+    cJSON *ja = cJSON_GetObjectItemCaseSensitive(root, "as_of");
+    int max_chars = (jc && cJSON_IsNumber(jc)) ? (int)jc->valuedouble : 32000;
+    int days      = (jd && cJSON_IsNumber(jd)) ? (int)jd->valuedouble : 7;
+    const char *as_of = (ja && cJSON_IsString(ja) && ja->valuestring[0])
+        ? ja->valuestring : NULL;
+
+    char *digest = crawler_build_digest(max_chars, days, as_of);
+    if (!digest) {
+        send_error(fd, "build_digest failed");
+        return;
+    }
+
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "type",   "news_digest");
+    cJSON_AddNumberToObject(o, "days",   days);
+    cJSON_AddStringToObject(o, "digest", digest);
+    send_obj(fd, o);
+    cJSON_Delete(o);
+    free(digest);
+}
+
+/* ── heston_path_bundle ─────────────────────────────────────────── */
+
 static void cmd_heston_path_bundle(int fd, cJSON *root) {
     cJSON *jsym = cJSON_GetObjectItemCaseSensitive(root, "symbol");
     cJSON *jh   = cJSON_GetObjectItemCaseSensitive(root, "horizon_days");
@@ -863,12 +191,10 @@ static void cmd_heston_path_bundle(int fd, cJSON *root) {
     int horizon  = (jh && cJSON_IsNumber(jh)) ? (int)jh->valuedouble : 21;
     int n_paths  = (jn && cJSON_IsNumber(jn)) ? (int)jn->valuedouble : 5000;
     int n_bkts   = (jb && cJSON_IsNumber(jb)) ? (int)jb->valuedouble : 100;
-    if (horizon <= 0 || horizon > 252) horizon = 21;
+    if (horizon <= 0 || horizon > 252)   horizon = 21;
     if (n_paths <= 0 || n_paths > 20000) n_paths = 5000;
     if (n_bkts  <= 0 || n_bkts  > 400)   n_bkts  = 100;
 
-    /* Warm the cache on demand so the user doesn't have to run backfill
-     * before they can click a symbol. */
     ensure_daily_history(symbol, 180, 30);
 
     int64_t now      = (int64_t)time(NULL) * 1000LL;
@@ -877,8 +203,7 @@ static void cmd_heston_path_bundle(int fd, cJSON *root) {
     OHLCBar bars[256];
     int n_bars = db_cache_load(symbol, "day", lookback, now, bars, 256);
     if (n_bars < 30) {
-        send_error(fd, "heston_path_bundle: insufficient price history "
-                       "(Polygon fetch failed — rate limit or bad ticker?)");
+        send_error(fd, "heston_path_bundle: insufficient price history");
         return;
     }
     HestonParams hp;
@@ -889,7 +214,9 @@ static void cmd_heston_path_bundle(int fd, cJSON *root) {
         return;
     }
 
-    /* Per-symbol deterministic seed. */
+    /* News-driven jump overlay on the per-symbol Bates params. */
+    news_jump_apply(&hp, symbol, now);
+
     uint64_t seed = 0xC0FFEEFEEDFACEEULL;
     for (const char *c = symbol; *c; c++) seed = seed * 131 + (uint8_t)*c;
 
@@ -914,15 +241,12 @@ static void cmd_heston_path_bundle(int fd, cJSON *root) {
     cJSON_AddNumberToObject(o, "expected_return", bundle.expected_return);
     cJSON_AddNumberToObject(o, "es_95",         bundle.es_95);
 
-    /* Time axis as days from now (0, 1, 2, ..., horizon).
-     * dt is uniform so we can just emit a linear range. */
     cJSON *jtime = cJSON_AddArrayToObject(o, "time_days");
     for (int s = 0; s < n_cols; s++) {
         double t_days = (double)s * (double)horizon / (double)bundle.n_steps;
         cJSON_AddItemToArray(jtime, cJSON_CreateNumber(t_days));
     }
 
-    /* Density grid as [n_buckets][n_cols] - row-major, bucket 0 = lowest. */
     cJSON *jdens = cJSON_AddArrayToObject(o, "density");
     for (int b = 0; b < bundle.n_buckets; b++) {
         cJSON *row = cJSON_CreateArray();
@@ -933,7 +257,6 @@ static void cmd_heston_path_bundle(int fd, cJSON *root) {
         cJSON_AddItemToArray(jdens, row);
     }
 
-    /* Quantile lines. */
     cJSON *jp05 = cJSON_AddArrayToObject(o, "p05");
     cJSON *jp50 = cJSON_AddArrayToObject(o, "p50");
     cJSON *jp95 = cJSON_AddArrayToObject(o, "p95");
@@ -943,22 +266,29 @@ static void cmd_heston_path_bundle(int fd, cJSON *root) {
         cJSON_AddItemToArray(jp95, cJSON_CreateNumber(bundle.p95[s]));
     }
 
+    /* Subsampled sample paths for the spaghetti overlay. Each path is
+     * classified by its terminal outcome: 0 = tail (below p05_T),
+     * 1 = middle, 2 = above p95_T. The frontend colours accordingly. */
+    cJSON *jsp    = cJSON_AddArrayToObject(o, "sample_paths");
+    cJSON *jcls   = cJSON_AddArrayToObject(o, "sample_class");
+    cJSON_AddNumberToObject(o, "n_sample_paths", bundle.n_sample_paths);
+    for (int i = 0; i < bundle.n_sample_paths; i++) {
+        cJSON *row = cJSON_CreateArray();
+        for (int s = 0; s < n_cols; s++) {
+            cJSON_AddItemToArray(row,
+                cJSON_CreateNumber(bundle.sample_paths[(size_t)i * (size_t)n_cols + s]));
+        }
+        cJSON_AddItemToArray(jsp, row);
+        cJSON_AddItemToArray(jcls, cJSON_CreateNumber(bundle.sample_class[i]));
+    }
+
     send_obj(fd, o);
     cJSON_Delete(o);
     heston_path_bundle_free(&bundle);
 }
 
-/* ── heston_surface ────────────────────────────────────────────── */
-/*
- * {"cmd":"heston_surface","symbol":"NVDA",
- *  "n_strikes":21,"n_maturities":12,
- *  "moneyness_lo":0.7,"moneyness_hi":1.3,
- *  "max_mat_days":180,"r":0.04}
- *
- * Calibrates Heston from history, builds the model-implied BS
- * volatility surface across the (strike x maturity) grid, returns it
- * for the canonical 3D vol-surface plot.
- */
+/* ── heston_surface ─────────────────────────────────────────────── */
+
 static void cmd_heston_surface(int fd, cJSON *root) {
     cJSON *jsym = cJSON_GetObjectItemCaseSensitive(root, "symbol");
     cJSON *jns  = cJSON_GetObjectItemCaseSensitive(root, "n_strikes");
@@ -984,7 +314,6 @@ static void cmd_heston_surface(int fd, cJSON *root) {
     if (n_mats    < 4 || n_mats    > 30) n_mats    = 12;
     if (max_md    < 7 || max_md    > 730) max_md   = 180;
 
-    /* Warm the cache on demand. */
     ensure_daily_history(symbol, 180, 30);
 
     int64_t now      = (int64_t)time(NULL) * 1000LL;
@@ -993,8 +322,7 @@ static void cmd_heston_surface(int fd, cJSON *root) {
     OHLCBar bars[256];
     int n_bars = db_cache_load(symbol, "day", lookback, now, bars, 256);
     if (n_bars < 30) {
-        send_error(fd, "heston_surface: insufficient price history "
-                       "(Polygon fetch failed — rate limit or bad ticker?)");
+        send_error(fd, "heston_surface: insufficient price history");
         return;
     }
     HestonParams hp;
@@ -1004,6 +332,7 @@ static void cmd_heston_surface(int fd, cJSON *root) {
         send_error(fd, "heston_surface: calibration failed");
         return;
     }
+    news_jump_apply(&hp, symbol, now);
     double spot = bars[n_bars - 1].close;
 
     HestonSurface surf = {0};
@@ -1039,7 +368,6 @@ static void cmd_heston_surface(int fd, cJSON *root) {
         cJSON_AddItemToArray(jmatT, cJSON_CreateNumber(surf.maturities_T[j]));
     }
 
-    /* iv as [n_strikes][n_maturities]. */
     cJSON *jiv = cJSON_AddArrayToObject(o, "iv");
     for (int i = 0; i < surf.n_strikes; i++) {
         cJSON *row = cJSON_CreateArray();
@@ -1055,14 +383,8 @@ static void cmd_heston_surface(int fd, cJSON *root) {
     heston_surface_free(&surf);
 }
 
-/* ── heston_diagnostics ───────────────────────────────────────── */
-/*
- * {"cmd":"heston_diagnostics","symbol":"NVDA","n_paths":4000}
- *
- * Runs Layer-1 calibration sanity checks for one ticker and returns
- * a JSON document with the Feller flag, simulated-vs-historical
- * moment comparison, realized-vol stability, and overall score.
- */
+/* ── heston_diagnostics ─────────────────────────────────────────── */
+
 static void cmd_heston_diagnostics(int fd, cJSON *root) {
     cJSON *jsym = cJSON_GetObjectItemCaseSensitive(root, "symbol");
     cJSON *jnp  = cJSON_GetObjectItemCaseSensitive(root, "n_paths");
@@ -1075,7 +397,6 @@ static void cmd_heston_diagnostics(int fd, cJSON *root) {
     if (n_paths < 200)   n_paths = 200;
     if (n_paths > 20000) n_paths = 20000;
 
-    /* 1 year of daily history. */
     int64_t now      = (int64_t)time(NULL) * 1000LL;
     int64_t lookback = now - 380LL * 86400LL * 1000LL;
 
@@ -1088,7 +409,6 @@ static void cmd_heston_diagnostics(int fd, cJSON *root) {
         return;
     }
 
-    /* Per-symbol deterministic seed so repeat calls match. */
     uint64_t seed = 0xD1A60057ABCDEF12ULL;
     for (const char *c = symbol; *c; c++) seed = seed * 131 + (uint8_t)*c;
 
@@ -1144,129 +464,390 @@ static void cmd_heston_diagnostics(int fd, cJSON *root) {
     cJSON_Delete(o);
 }
 
-/* ── convergence_check ─────────────────────────────────────────── */
-/*
- * {"cmd":"convergence_check","run_id":42,"k":20,
- *  "prev":["NVDA","AAPL",...],   // top-K from the previous wave
- *  "threshold":0.9}
- *
- * Re-aggregates the run, returns the current top-K, the Jaccard
- * similarity vs `prev`, and a `stable` flag (Jaccard >= threshold).
- * Used by the parallel orchestrator to short-circuit ensembles once
- * the consensus stops moving.
- */
-static void cmd_convergence_check(int fd, cJSON *root) {
-    cJSON *jr = cJSON_GetObjectItemCaseSensitive(root, "run_id");
-    cJSON *jk = cJSON_GetObjectItemCaseSensitive(root, "k");
-    cJSON *jp = cJSON_GetObjectItemCaseSensitive(root, "prev");
-    cJSON *jt = cJSON_GetObjectItemCaseSensitive(root, "threshold");
+/* ── news_jump_status ───────────────────────────────────────────── */
 
-    if (!jr || !cJSON_IsNumber(jr)) {
-        send_error(fd, "convergence_check: missing run_id");
-        return;
-    }
-    long long run_id = (long long)jr->valuedouble;
-    int k = (jk && cJSON_IsNumber(jk)) ? (int)jk->valuedouble : 20;
-    double threshold = (jt && cJSON_IsNumber(jt)) ? jt->valuedouble : 0.9;
-    if (k <= 0 || k > 500) k = 20;
+static void cmd_news_jump_status(int fd, cJSON *root) {
+    int window_hours = 48;
+    cJSON *jw = cJSON_GetObjectItemCaseSensitive(root, "window_hours");
+    if (cJSON_IsNumber(jw) && jw->valuedouble > 0) window_hours = (int)jw->valuedouble;
 
-    AggResult top[500];
-    int got = load_top_k_for_run(run_id, k, top);
-    if (got < 0) { send_error(fd, "load_run failed"); return; }
+    int64_t now = (int64_t)time(NULL) * 1000LL;
+    (void)news_jump_recompute(now, window_hours);
 
-    /* Build prev[] from the symbol-only JSON array. count is irrelevant
-     * for Jaccard — convergence treats it as a set. */
-    AggResult prev[500];
-    int n_prev = 0;
-    if (jp && cJSON_IsArray(jp)) {
-        int n = cJSON_GetArraySize(jp);
-        if (n > 500) n = 500;
-        for (int i = 0; i < n; i++) {
-            cJSON *e = cJSON_GetArrayItem(jp, i);
-            if (!e || !cJSON_IsString(e)) continue;
-            strncpy(prev[n_prev].symbol, e->valuestring, MAX_SYMBOL_LEN - 1);
-            prev[n_prev].symbol[MAX_SYMBOL_LEN - 1] = '\0';
-            prev[n_prev].count = 1;
-            n_prev++;
+    cJSON *rows = cJSON_CreateArray();
+    cJSON *arr  = cJSON_GetObjectItemCaseSensitive(root, "symbols");
+    if (cJSON_IsArray(arr)) {
+        cJSON *el;
+        cJSON_ArrayForEach(el, arr) {
+            if (!cJSON_IsString(el) || !el->valuestring) continue;
+            NewsJumpSignal s;
+            int got = news_jump_get(el->valuestring, now, &s);
+            cJSON *row = cJSON_CreateObject();
+            cJSON_AddStringToObject(row, "symbol", el->valuestring);
+            if (got == 1) {
+                cJSON_AddNumberToObject(row, "as_of",        (double)s.as_of);
+                cJSON_AddNumberToObject(row, "window_hours", s.window_hours);
+                cJSON_AddNumberToObject(row, "n_articles",   s.n_articles);
+                cJSON_AddNumberToObject(row, "sentiment_avg",s.sentiment_avg);
+                cJSON_AddStringToObject(row, "event_class",  s.event_class);
+                cJSON_AddNumberToObject(row, "lam_bump",     s.lam_bump);
+                cJSON_AddNumberToObject(row, "mu_j_bias",    s.mu_j_bias);
+                cJSON_AddNumberToObject(row, "sigma_j_bump", s.sigma_j_bump);
+            } else {
+                cJSON_AddNumberToObject(row, "n_articles",   0);
+                cJSON_AddNumberToObject(row, "sentiment_avg",0);
+                cJSON_AddStringToObject(row, "event_class",  "");
+                cJSON_AddNumberToObject(row, "lam_bump",     0);
+                cJSON_AddNumberToObject(row, "mu_j_bias",    0);
+                cJSON_AddNumberToObject(row, "sigma_j_bump", 0);
+            }
+            cJSON_AddItemToArray(rows, row);
         }
     }
 
-    double jaccard = convergence_jaccard(top, got, prev, n_prev);
-    int stable = convergence_is_stable(top, got, prev, n_prev, threshold);
-
     cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "type",      "convergence_check");
-    cJSON_AddNumberToObject(o, "run_id",    (double)run_id);
-    cJSON_AddNumberToObject(o, "jaccard",   jaccard);
-    cJSON_AddNumberToObject(o, "threshold", threshold);
-    cJSON_AddBoolToObject  (o, "stable",    stable);
-    cJSON *arr = cJSON_AddArrayToObject(o, "top");
-    for (int i = 0; i < got; i++) {
-        cJSON *e = cJSON_CreateObject();
-        cJSON_AddStringToObject(e, "symbol", top[i].symbol);
-        cJSON_AddNumberToObject(e, "count",  top[i].count);
-        cJSON_AddItemToArray(arr, e);
-    }
+    cJSON_AddStringToObject(o, "type",         "news_jump");
+    cJSON_AddNumberToObject(o, "as_of",        (double)now);
+    cJSON_AddNumberToObject(o, "window_hours", window_hours);
+    cJSON_AddItemToObject   (o, "rows",        rows);
     send_obj(fd, o);
     cJSON_Delete(o);
 }
 
-/* ── rebalance_resolve ─────────────────────────────────────────── */
+/* ── Universe parsing helper (symbols array -> C-string array) ──── */
 /*
- * {"cmd":"rebalance_resolve","event_id":17,"action":"sell",
- *  "override":"keep - earnings beat coming"}
- *
- * Marks an outstanding NOTIFY/ESCALATE event as resolved with the
- * user's chosen action (and optional override note).
+ * Reads a JSON symbols array, allocates a caller-owned char** with
+ * up to MAX_SYMS entries. Each string is heap-allocated; free everything
+ * with free_symbols(). Returns the number of symbols parsed.
  */
-static void cmd_rebalance_resolve(int fd, cJSON *root) {
-    cJSON *jid = cJSON_GetObjectItemCaseSensitive(root, "event_id");
-    cJSON *jac = cJSON_GetObjectItemCaseSensitive(root, "action");
-    cJSON *jov = cJSON_GetObjectItemCaseSensitive(root, "override");
-    if (!jid || !cJSON_IsNumber(jid) ||
-        !jac || !cJSON_IsString(jac)) {
-        send_error(fd, "rebalance_resolve: need event_id and action");
-        return;
-    }
-    long long id = (long long)jid->valuedouble;
-    const char *act = jac->valuestring;
-    const char *override = (jov && cJSON_IsString(jov) && jov->valuestring[0])
-        ? jov->valuestring : NULL;
+#define MAX_UNIVERSE 500
 
-    if (db_rebalance_resolve(id, act, override) != 0) {
-        send_error(fd, "rebalance_resolve failed");
+static int parse_symbols(cJSON *root, char ***out_syms) {
+    cJSON *arr = cJSON_GetObjectItemCaseSensitive(root, "symbols");
+    if (!cJSON_IsArray(arr)) return 0;
+
+    char **syms = (char **)calloc(MAX_UNIVERSE, sizeof(char *));
+    if (!syms) return 0;
+
+    int n = 0;
+    cJSON *el;
+    cJSON_ArrayForEach(el, arr) {
+        if (!cJSON_IsString(el) || !el->valuestring) continue;
+        if (n >= MAX_UNIVERSE) break;
+        size_t L = strlen(el->valuestring);
+        if (L == 0 || L >= MAX_SYMBOL_LEN) continue;
+        syms[n] = (char *)malloc(L + 1);
+        if (!syms[n]) break;
+        memcpy(syms[n], el->valuestring, L + 1);
+        n++;
+    }
+
+    *out_syms = syms;
+    return n;
+}
+
+static void free_symbols(char **syms, int n) {
+    if (!syms) return;
+    for (int i = 0; i < n; i++) free(syms[i]);
+    free(syms);
+}
+
+/* ── Bates option-level backtest ─────────────────────────────────── */
+/*
+ * Stateless.
+ * Request:
+ *   {"cmd":"bates_backtest_run",
+ *    "symbols":["AAPL","MSFT",...],
+ *    "horizon_days":30, "moneyness_lo":0.85, "moneyness_hi":1.15,
+ *    "n_strikes":7, "expiries_days":[7,30,90],
+ *    "n_paths":256, "noise_sigma_vol":0.015, "r":0.045, "seed":123}
+ */
+static void cmd_bates_backtest_run(int fd, cJSON *root) {
+    cJSON *jh  = cJSON_GetObjectItemCaseSensitive(root, "horizon_days");
+    cJSON *jml = cJSON_GetObjectItemCaseSensitive(root, "moneyness_lo");
+    cJSON *jmh = cJSON_GetObjectItemCaseSensitive(root, "moneyness_hi");
+    cJSON *jns = cJSON_GetObjectItemCaseSensitive(root, "n_strikes");
+    cJSON *jex = cJSON_GetObjectItemCaseSensitive(root, "expiries_days");
+    cJSON *jnp = cJSON_GetObjectItemCaseSensitive(root, "n_paths");
+    cJSON *jsg = cJSON_GetObjectItemCaseSensitive(root, "noise_sigma_vol");
+    cJSON *jr2 = cJSON_GetObjectItemCaseSensitive(root, "r");
+    cJSON *jsd = cJSON_GetObjectItemCaseSensitive(root, "seed");
+
+    int    horizon    = (jh && cJSON_IsNumber(jh))  ? (int)jh->valuedouble  : 30;
+    double m_lo       = (jml && cJSON_IsNumber(jml))? jml->valuedouble      : 0.85;
+    double m_hi       = (jmh && cJSON_IsNumber(jmh))? jmh->valuedouble      : 1.15;
+    int    n_strikes  = (jns && cJSON_IsNumber(jns))? (int)jns->valuedouble : 7;
+    int    n_paths    = (jnp && cJSON_IsNumber(jnp))? (int)jnp->valuedouble : 256;
+    double sigma_vol  = (jsg && cJSON_IsNumber(jsg))? jsg->valuedouble      : 0.015;
+    double r_rate     = (jr2 && cJSON_IsNumber(jr2))? jr2->valuedouble      : 0.045;
+    uint64_t seed     = (jsd && cJSON_IsNumber(jsd))
+        ? (uint64_t)jsd->valuedouble : 0xC0FFEE1234567890ULL;
+
+    int  ex_default[3] = { 7, 30, 90 };
+    int  ex_buf[16];
+    int  n_ex = 0;
+    if (cJSON_IsArray(jex)) {
+        cJSON *el;
+        cJSON_ArrayForEach(el, jex) {
+            if (cJSON_IsNumber(el) && n_ex < 16)
+                ex_buf[n_ex++] = (int)el->valuedouble;
+        }
+    }
+    const int *expiries = n_ex > 0 ? ex_buf : ex_default;
+    if (n_ex == 0) n_ex = 3;
+
+    char **syms = NULL;
+    int    n_syms = parse_symbols(root, &syms);
+    if (n_syms <= 0) {
+        send_error(fd, "bates_backtest_run: missing/empty symbols array");
+        free_symbols(syms, n_syms);
         return;
     }
+
+    int64_t session_id = (int64_t)time(NULL);
+
+    BatesBacktestRow *rows = NULL;
+    int              n_out = 0;
+    BatesBacktestSummary sum = {0};
+
+    if (bates_backtest_run((const char *const *)syms, n_syms,
+                           session_id, horizon,
+                           m_lo, m_hi, n_strikes,
+                           expiries, n_ex,
+                           n_paths, sigma_vol,
+                           seed, r_rate,
+                           &rows, &n_out, &sum) != 0) {
+        send_error(fd, "bates_backtest_run failed");
+        free(rows);
+        free_symbols(syms, n_syms);
+        return;
+    }
+
     cJSON *o = cJSON_CreateObject();
-    cJSON_AddStringToObject(o, "type", "rebalance_resolved");
-    cJSON_AddNumberToObject(o, "event_id", (double)id);
+    cJSON_AddStringToObject(o, "type",       "bates_backtest");
+    cJSON_AddNumberToObject(o, "session_id", (double)session_id);
+
+    cJSON *js = cJSON_CreateObject();
+    cJSON_AddNumberToObject(js, "n_rows",          sum.n_rows);
+    cJSON_AddNumberToObject(js, "n_symbols",       sum.n_symbols);
+    cJSON_AddNumberToObject(js, "n_strikes",       sum.n_strikes);
+    cJSON_AddNumberToObject(js, "n_expiries",      sum.n_expiries);
+    cJSON_AddNumberToObject(js, "n_paths",         sum.n_paths);
+    cJSON_AddNumberToObject(js, "horizon_days",    sum.horizon_days);
+    cJSON_AddNumberToObject(js, "noise_sigma_vol", sum.noise_sigma_vol);
+    cJSON_AddNumberToObject(js, "r",               sum.r);
+    cJSON_AddNumberToObject(js, "mean_edge_vol_pts",     sum.mean_edge_vol_pts);
+    cJSON_AddNumberToObject(js, "std_edge_vol_pts",      sum.std_edge_vol_pts);
+    cJSON_AddNumberToObject(js, "hit_rate_edge_gt_1vol", sum.hit_rate_edge_gt_1vol);
+    cJSON_AddNumberToObject(js, "avg_hedged_pnl",        sum.avg_hedged_pnl);
+    cJSON_AddNumberToObject(js, "avg_sharpe_daily",      sum.avg_sharpe_daily);
+    cJSON_AddItemToObject(o, "summary", js);
+
+    cJSON *arr = cJSON_CreateArray();
+    for (int i = 0; i < n_out; i++) {
+        BatesBacktestRow *rw = &rows[i];
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddStringToObject(e, "symbol",       rw->symbol);
+        cJSON_AddNumberToObject(e, "strike",       rw->strike);
+        cJSON_AddNumberToObject(e, "dte_days",     rw->dte_days);
+        char rch[2] = { rw->right, 0 };
+        cJSON_AddStringToObject(e, "right",        rch);
+        cJSON_AddNumberToObject(e, "spot",         rw->spot);
+        cJSON_AddNumberToObject(e, "model_iv",     rw->model_iv);
+        cJSON_AddNumberToObject(e, "market_iv",    rw->market_iv);
+        cJSON_AddNumberToObject(e, "edge_vol_pts", rw->edge_vol_pts);
+        cJSON_AddNumberToObject(e, "premium",      rw->premium);
+        cJSON_AddNumberToObject(e, "delta",        rw->delta0);
+        cJSON_AddNumberToObject(e, "gamma",        rw->gamma0);
+        cJSON_AddNumberToObject(e, "vega",         rw->vega0);
+        cJSON_AddNumberToObject(e, "expected_hedged_pnl", rw->expected_hedged_pnl);
+        cJSON_AddNumberToObject(e, "std_hedged_pnl",      rw->std_hedged_pnl);
+        cJSON_AddNumberToObject(e, "sharpe_daily",        rw->sharpe_daily);
+        cJSON_AddNumberToObject(e, "n_paths",             rw->n_paths);
+        cJSON_AddNumberToObject(e, "signed_edge",         rw->signed_edge);
+        cJSON_AddNumberToObject(e, "dollar_edge",         rw->dollar_edge);
+        cJSON_AddItemToArray(arr, e);
+    }
+    cJSON_AddItemToObject(o, "rows", arr);
+
     send_obj(fd, o);
     cJSON_Delete(o);
+    free(rows);
+    free_symbols(syms, n_syms);
+}
+
+/* ── Option-level z-score fusion (Bates edge + news + convex) ────── */
+/*
+ * Stateless.
+ * Request:
+ *   {"cmd":"option_ranking_blend",
+ *    "symbols":["AAPL","MSFT",...],
+ *    "horizon_days":30, "moneyness_lo":0.85, "moneyness_hi":1.15,
+ *    "n_strikes":7, "expiries_days":[7,30,90],
+ *    "n_paths":256, "noise_sigma_vol":0.015, "r":0.045, "seed":123,
+ *    "w_edge":0.60, "w_news":0.27, "w_convex":0.13,
+ *    "min_universe":8}
+ */
+static void cmd_option_ranking_blend(int fd, cJSON *root) {
+    cJSON *jh  = cJSON_GetObjectItemCaseSensitive(root, "horizon_days");
+    cJSON *jml = cJSON_GetObjectItemCaseSensitive(root, "moneyness_lo");
+    cJSON *jmh = cJSON_GetObjectItemCaseSensitive(root, "moneyness_hi");
+    cJSON *jns = cJSON_GetObjectItemCaseSensitive(root, "n_strikes");
+    cJSON *jex = cJSON_GetObjectItemCaseSensitive(root, "expiries_days");
+    cJSON *jnp = cJSON_GetObjectItemCaseSensitive(root, "n_paths");
+    cJSON *jsg = cJSON_GetObjectItemCaseSensitive(root, "noise_sigma_vol");
+    cJSON *jr2 = cJSON_GetObjectItemCaseSensitive(root, "r");
+    cJSON *jsd = cJSON_GetObjectItemCaseSensitive(root, "seed");
+    cJSON *jwe = cJSON_GetObjectItemCaseSensitive(root, "w_edge");
+    cJSON *jwn = cJSON_GetObjectItemCaseSensitive(root, "w_news");
+    cJSON *jwc = cJSON_GetObjectItemCaseSensitive(root, "w_convex");
+    cJSON *jmu = cJSON_GetObjectItemCaseSensitive(root, "min_universe");
+
+    int    horizon   = (jh && cJSON_IsNumber(jh))  ? (int)jh->valuedouble  : 30;
+    double m_lo      = (jml && cJSON_IsNumber(jml))? jml->valuedouble      : 0.85;
+    double m_hi      = (jmh && cJSON_IsNumber(jmh))? jmh->valuedouble      : 1.15;
+    int    n_strikes = (jns && cJSON_IsNumber(jns))? (int)jns->valuedouble : 7;
+    int    n_paths   = (jnp && cJSON_IsNumber(jnp))? (int)jnp->valuedouble : 256;
+    double sigma_vol = (jsg && cJSON_IsNumber(jsg))? jsg->valuedouble      : 0.015;
+    double r_rate    = (jr2 && cJSON_IsNumber(jr2))? jr2->valuedouble      : 0.045;
+    uint64_t seed    = (jsd && cJSON_IsNumber(jsd))
+        ? (uint64_t)jsd->valuedouble : 0xC0FFEE1234567890ULL;
+    int  min_uni     = (jmu && cJSON_IsNumber(jmu))? (int)jmu->valuedouble : 8;
+
+    OptionScoreWeights w;
+    option_score_default_weights(&w);
+    if (jwe && cJSON_IsNumber(jwe)) w.w_edge   = jwe->valuedouble;
+    if (jwn && cJSON_IsNumber(jwn)) w.w_news   = jwn->valuedouble;
+    if (jwc && cJSON_IsNumber(jwc)) w.w_convex = jwc->valuedouble;
+
+    int  ex_default[3] = { 7, 30, 90 };
+    int  ex_buf[16];
+    int  n_ex = 0;
+    if (cJSON_IsArray(jex)) {
+        cJSON *el;
+        cJSON_ArrayForEach(el, jex) {
+            if (cJSON_IsNumber(el) && n_ex < 16)
+                ex_buf[n_ex++] = (int)el->valuedouble;
+        }
+    }
+    const int *expiries = n_ex > 0 ? ex_buf : ex_default;
+    if (n_ex == 0) n_ex = 3;
+
+    char **syms = NULL;
+    int    n_syms = parse_symbols(root, &syms);
+    if (n_syms <= 0) {
+        send_error(fd, "option_ranking_blend: missing/empty symbols array");
+        free_symbols(syms, n_syms);
+        return;
+    }
+
+    int64_t session_id = (int64_t)time(NULL);
+    int64_t now        = session_id * 1000LL;
+
+    /* Bates backtest fills the option grid. */
+    BatesBacktestRow *bates_rows = NULL;
+    int                bates_n   = 0;
+    BatesBacktestSummary sum     = {0};
+    if (bates_backtest_run((const char *const *)syms, n_syms,
+                           session_id, horizon,
+                           m_lo, m_hi, n_strikes,
+                           expiries, n_ex,
+                           n_paths, sigma_vol,
+                           seed, r_rate,
+                           &bates_rows, &bates_n, &sum) != 0) {
+        send_error(fd, "option_ranking_blend: Bates backtest failed");
+        free(bates_rows);
+        free_symbols(syms, n_syms);
+        return;
+    }
+
+    /* Per-symbol fusion inputs: only the news scalar remains. */
+    PerSymbolFusionInput *ps =
+        (PerSymbolFusionInput *)calloc((size_t)n_syms, sizeof(PerSymbolFusionInput));
+    if (!ps) { send_error(fd, "oom"); free(bates_rows); free_symbols(syms, n_syms); return; }
+
+    for (int i = 0; i < n_syms; i++) {
+        strncpy(ps[i].symbol, syms[i], MAX_SYMBOL_LEN - 1);
+        NewsJumpSignal njs;
+        int got = news_jump_get(syms[i], now, &njs);
+        ps[i].news_scalar = (got == 1)
+            ? njs.lam_bump + 5.0 * fabs(njs.mu_j_bias)
+            : 0.0;
+    }
+
+    OptionScoredResult *ranked = NULL;
+    if (option_score_run(bates_rows, bates_n, ps, n_syms, &w, min_uni,
+                         &ranked) != 0) {
+        send_error(fd, "option_ranking_blend: fusion failed");
+        free(bates_rows); free(ps); free_symbols(syms, n_syms);
+        return;
+    }
+
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "type",       "option_ranking");
+    cJSON_AddNumberToObject(o, "session_id", (double)session_id);
+    cJSON_AddNumberToObject(o, "n_rows",     bates_n);
+
+    cJSON *wj = cJSON_CreateObject();
+    cJSON_AddNumberToObject(wj, "w_edge",   w.w_edge);
+    cJSON_AddNumberToObject(wj, "w_news",   w.w_news);
+    cJSON_AddNumberToObject(wj, "w_convex", w.w_convex);
+    cJSON_AddItemToObject(o, "weights", wj);
+
+    cJSON *arr = cJSON_CreateArray();
+    for (int i = 0; i < bates_n; i++) {
+        OptionScoredResult *r = &ranked[i];
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddNumberToObject(e, "rank",         r->rank);
+        cJSON_AddStringToObject(e, "symbol",       r->bates.symbol);
+        cJSON_AddNumberToObject(e, "strike",       r->bates.strike);
+        cJSON_AddNumberToObject(e, "dte_days",     r->bates.dte_days);
+        char rch[2] = { r->bates.right, 0 };
+        cJSON_AddStringToObject(e, "right",        rch);
+        cJSON_AddNumberToObject(e, "spot",         r->bates.spot);
+        cJSON_AddNumberToObject(e, "model_iv",     r->bates.model_iv);
+        cJSON_AddNumberToObject(e, "market_iv",    r->bates.market_iv);
+        cJSON_AddNumberToObject(e, "edge_vol_pts", r->bates.edge_vol_pts);
+        cJSON_AddNumberToObject(e, "dollar_edge",  r->bates.dollar_edge);
+        cJSON_AddNumberToObject(e, "premium",      r->bates.premium);
+        cJSON_AddNumberToObject(e, "delta",        r->bates.delta0);
+        cJSON_AddNumberToObject(e, "gamma",        r->bates.gamma0);
+        cJSON_AddNumberToObject(e, "vega",         r->bates.vega0);
+        cJSON_AddNumberToObject(e, "expected_hedged_pnl", r->bates.expected_hedged_pnl);
+        cJSON_AddNumberToObject(e, "sharpe_daily",        r->bates.sharpe_daily);
+        cJSON_AddNumberToObject(e, "z_bates_edge",        r->z_bates_edge);
+        cJSON_AddNumberToObject(e, "z_news_jump",         r->z_news_jump);
+        cJSON_AddNumberToObject(e, "z_convexity",         r->z_convexity);
+        cJSON_AddNumberToObject(e, "blended_option_score",r->blended_option_score);
+        cJSON_AddNumberToObject(e, "signed_edge",         r->bates.signed_edge);
+        cJSON_AddItemToArray(arr, e);
+    }
+    cJSON_AddItemToObject(o, "ranked", arr);
+
+    send_obj(fd, o);
+    cJSON_Delete(o);
+
+    free(bates_rows);
+    free(ps);
+    free(ranked);
+    free_symbols(syms, n_syms);
 }
 
 /* ── Public dispatch ────────────────────────────────────────────── */
 
-void ipc_research_init(void)    { /* no-op for now */ }
-void ipc_research_cleanup(void) { /* no-op for now */ }
+void ipc_research_init(void)    { /* no-op */ }
+void ipc_research_cleanup(void) { /* no-op */ }
 
 int ipc_research_dispatch(int client_fd, const char *cmd, cJSON *root) {
     if (!cmd) return 0;
-    if      (!strcmp(cmd, "sp500_list"))         { cmd_sp500_list(client_fd);              return 1; }
-    else if (!strcmp(cmd, "bot_runs_list"))      { cmd_bot_runs_list(client_fd, root);     return 1; }
-    else if (!strcmp(cmd, "bot_run_create"))     { cmd_bot_run_create(client_fd, root);    return 1; }
-    else if (!strcmp(cmd, "bot_picks_ingest"))   { cmd_bot_picks_ingest(client_fd, root);  return 1; }
-    else if (!strcmp(cmd, "bot_run_finish"))     { cmd_bot_run_finish(client_fd, root);    return 1; }
-    else if (!strcmp(cmd, "aggregate_run"))      { cmd_aggregate_run(client_fd, root);     return 1; }
-    else if (!strcmp(cmd, "backtest_run"))       { cmd_backtest_run(client_fd, root);      return 1; }
-    else if (!strcmp(cmd, "crawl_news"))         { cmd_crawl_news(client_fd, root);        return 1; }
-    else if (!strcmp(cmd, "get_news_digest"))    { cmd_get_news_digest(client_fd, root);   return 1; }
-    else if (!strcmp(cmd, "heston_score_run"))   { cmd_heston_score_run(client_fd, root);  return 1; }
-    else if (!strcmp(cmd, "ranking_blend"))      { cmd_ranking_blend(client_fd, root);     return 1; }
-    else if (!strcmp(cmd, "rebalance_check"))    { cmd_rebalance_check(client_fd, root);   return 1; }
-    else if (!strcmp(cmd, "rebalance_resolve"))  { cmd_rebalance_resolve(client_fd, root); return 1; }
-    else if (!strcmp(cmd, "convergence_check"))  { cmd_convergence_check(client_fd, root); return 1; }
-    else if (!strcmp(cmd, "heston_path_bundle")) { cmd_heston_path_bundle(client_fd, root); return 1; }
-    else if (!strcmp(cmd, "heston_surface"))     { cmd_heston_surface(client_fd, root);     return 1; }
-    else if (!strcmp(cmd, "heston_diagnostics")) { cmd_heston_diagnostics(client_fd, root); return 1; }
+    if      (!strcmp(cmd, "sp500_list"))           { cmd_sp500_list(client_fd);                 return 1; }
+    else if (!strcmp(cmd, "crawl_news"))           { cmd_crawl_news(client_fd, root);           return 1; }
+    else if (!strcmp(cmd, "get_news_digest"))      { cmd_get_news_digest(client_fd, root);      return 1; }
+    else if (!strcmp(cmd, "news_jump_status"))     { cmd_news_jump_status(client_fd, root);     return 1; }
+    else if (!strcmp(cmd, "heston_path_bundle"))   { cmd_heston_path_bundle(client_fd, root);   return 1; }
+    else if (!strcmp(cmd, "heston_surface"))       { cmd_heston_surface(client_fd, root);       return 1; }
+    else if (!strcmp(cmd, "heston_diagnostics"))   { cmd_heston_diagnostics(client_fd, root);   return 1; }
+    else if (!strcmp(cmd, "bates_backtest_run"))   { cmd_bates_backtest_run(client_fd, root);   return 1; }
+    else if (!strcmp(cmd, "option_ranking_blend")) { cmd_option_ranking_blend(client_fd, root); return 1; }
     return 0;
 }

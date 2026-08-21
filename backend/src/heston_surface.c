@@ -21,29 +21,36 @@
 /* MSVC's complex.h differs from POSIX; we're on gcc/MinGW so the
  * GNU spelling works. _Complex_I is the imaginary unit. */
 
-/* ---------- Heston CF at complex argument (little trap form) ---------- */
+/* ---------- Heston (+Bates jumps) CF at complex argument ---------- */
 
 /*
  * phi(omega; T) for X = ln(S_T) under risk-neutral measure:
  *
- *   phi(omega) = exp( i*omega*(ln(S0) + r*T) + C(omega) + D(omega)*v0 )
+ *   phi(omega) = phi_Heston(omega) * phi_jump(omega)
  *
+ * Heston (Albrecher "little trap"):
  *   xi  = kappa - rho*sigma*i*omega
  *   d   = sqrt(xi^2 + sigma^2 * (i*omega + omega^2))
- *   A1  = i*omega*(i*omega - 1) * sinh(d*T/2)
  *   A2  = d*cosh(d*T/2) + xi*sinh(d*T/2)
- *   D   = A1 / A2
- *   B   = d * exp(kappa*T/2) / A2
- *   C   = (kappa*theta/sigma^2) * ((kappa - rho*sigma*i*omega)*T - 2*ln(B))
+ *   D   = i*omega*(i*omega - 1) * sinh(d*T/2) / A2
+ *   G   = A2 / d
+ *   C   = (kappa*theta/sigma^2) * ( xi*T - 2*log(G) )
+ *   phi_H = exp( i*omega*(ln S0 + r*T) + C + D*v0 )
  *
- * Albrecher (2007) "little trap" keeps the complex logarithm in the
- * principal branch — no manual branch-cut tracking required.
+ * Bates jump component (compensated Merton, matches the MC scheme):
+ *   k        = exp(mu_j + 0.5*sigma_j^2) - 1
+ *   phi_J    = exp( lam*T * ( exp(i*omega*mu_j - 0.5*sigma_j^2*omega^2)
+ *                             - 1 - i*omega*k ) )
+ *
+ * Passing lam == 0 collapses phi_J to 1 and recovers pure Heston.
  */
 static double complex heston_cf_complex(double complex omega,
                                         double S0, double T, double r,
                                         double kappa, double theta,
                                         double sigma, double rho,
-                                        double v0)
+                                        double v0,
+                                        double lam, double mu_j,
+                                        double sigma_j)
 {
     double complex iom = _Complex_I * omega;
     double complex xi = kappa - rho * sigma * iom;
@@ -52,20 +59,22 @@ static double complex heston_cf_complex(double complex omega,
     double complex coshDT = ccosh(d * T / 2.0);
     double complex A2 = d * coshDT + xi * sinhDT;
 
-    /* D(omega) = i*omega*(i*omega - 1) * sinh(d*T/2) / A2
-     * C(omega) = (kappa*theta/sigma^2) * ( xi*T - 2*log(A2/d) )
-     * phi(omega) = exp( i*omega*(ln S0 + r*T) + C + D*v0 )
-     *
-     * Sanity check: at omega = 0, xi=kappa, d=kappa, A2=kappa*exp(kT/2),
-     * A2/d = exp(kT/2), 2*log(A2/d) = kappa*T, so C(0) = 0 and
-     * D(0) = 0  =>  phi(0) = 1. Confirmed.
-     */
     double complex Dpart = iom * (iom - 1.0) * sinhDT / A2;
     double complex G = A2 / d;
     double complex Cpart = (kappa * theta / (sigma * sigma)) *
                            (xi * T - 2.0 * clog(G));
 
-    return cexp(iom * (log(S0) + r * T) + Cpart + Dpart * v0);
+    double complex phi_H = cexp(iom * (log(S0) + r * T) + Cpart + Dpart * v0);
+
+    if (lam <= 0.0) return phi_H;
+
+    /* Compensated Merton jump CF. */
+    double k_jump = exp(mu_j + 0.5 * sigma_j * sigma_j) - 1.0;
+    double complex phi_J = cexp(
+        lam * T * (cexp(iom * mu_j - 0.5 * sigma_j * sigma_j * omega * omega)
+                   - 1.0 - iom * k_jump));
+
+    return phi_H * phi_J;
 }
 
 /* ---------- Heston (1993) original P1/P2 call pricing ----------
@@ -114,11 +123,13 @@ double heston_call_price(const HestonParams *p,
 
         double complex phi_u = heston_cf_complex(u, S, T, r,
                                                  p->kappa, p->theta,
-                                                 p->sigma_v, p->rho, p->v0);
+                                                 p->sigma_v, p->rho, p->v0,
+                                                 p->lam, p->mu_j, p->sigma_j);
         double complex phi_um1 = heston_cf_complex(u - _Complex_I * 1.0,
                                                    S, T, r,
                                                    p->kappa, p->theta,
-                                                   p->sigma_v, p->rho, p->v0);
+                                                   p->sigma_v, p->rho, p->v0,
+                                                   p->lam, p->mu_j, p->sigma_j);
 
         /* f_1(u) = phi(u-i) / (S * exp(r*T))  — the stock-numeraire CF */
         double complex f1 = phi_um1 / (S * exp(r * T));

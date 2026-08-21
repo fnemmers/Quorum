@@ -75,6 +75,23 @@ static double rng_normal(Rng *r) {
     return z1;
 }
 
+/* Poisson(mean) via Knuth's multiplicative method. Cheap for small
+ * mean (< ~10), which is our regime — lam*dt is O(1e-2) even when
+ * lam ~ 4/yr and dt ~ 1 day. */
+static int rng_poisson(Rng *r, double mean) {
+    if (mean <= 0.0) return 0;
+    /* Guard against very large means to keep the loop bounded. */
+    if (mean > 30.0) mean = 30.0;
+    double L = exp(-mean);
+    double p = 1.0;
+    int    k = 0;
+    do {
+        k++;
+        p *= rng_uniform(r);
+    } while (p > L);
+    return k - 1;
+}
+
 /* ---------- ES_95 over a sorted return array ---------- */
 
 static int cmp_double_asc(const void *a, const void *b) {
@@ -99,15 +116,28 @@ static double expected_shortfall_95(double *returns, int n) {
     return sum / (double)tail_n;
 }
 
-/* ---------- Single-path Heston simulation, returns the terminal return. ---------- */
+/* ---------- Single-path Heston (+Bates jumps) simulation ---------- */
+/* Returns the terminal return; if n_jumps_accum is non-NULL, adds the
+ * number of Poisson jumps drawn on this path to *n_jumps_accum so the
+ * caller can report jump-contribution diagnostics. */
 
-static double simulate_one_path(const HestonParams *p, Rng *rng) {
+static double simulate_one_path(const HestonParams *p, Rng *rng,
+                                int *n_jumps_accum) {
     double dt = p->T / (double)p->steps;
     double sqrt_dt = sqrt(dt);
     double rho_comp = sqrt(1.0 - p->rho * p->rho);
 
+    /* Bates compensator: k = E[J-1] under LN(mu_j, sigma_j^2). */
+    int    jumps_on = (p->lam > 0.0);
+    double lam_dt   = jumps_on ? p->lam * dt : 0.0;
+    double k_jump   = jumps_on
+        ? (exp(p->mu_j + 0.5 * p->sigma_j * p->sigma_j) - 1.0)
+        : 0.0;
+    double drift_adj = jumps_on ? (-p->lam * k_jump * dt) : 0.0;
+
     double v = p->v0;
     double log_s = log(p->s0);
+    int    path_jumps = 0;
 
     for (int i = 0; i < p->steps; i++) {
         double z1 = rng_normal(rng);
@@ -117,10 +147,23 @@ static double simulate_one_path(const HestonParams *p, Rng *rng) {
         double v_pos = v > 0.0 ? v : 0.0;
         double sqrt_v = sqrt(v_pos);
 
-        log_s += (p->mu - 0.5 * v_pos) * dt + sqrt_v * sqrt_dt * z1;
+        log_s += (p->mu - 0.5 * v_pos) * dt + sqrt_v * sqrt_dt * z1 + drift_adj;
         v     += p->kappa * (p->theta - v_pos) * dt
                  + p->sigma_v * sqrt_v * sqrt_dt * z2;
+
+        if (jumps_on) {
+            int n_j = rng_poisson(rng, lam_dt);
+            if (n_j > 0) {
+                double jump_sum = 0.0;
+                for (int j = 0; j < n_j; j++)
+                    jump_sum += p->mu_j + p->sigma_j * rng_normal(rng);
+                log_s += jump_sum;
+                path_jumps += n_j;
+            }
+        }
     }
+
+    if (n_jumps_accum) *n_jumps_accum += path_jumps;
 
     double s_t = exp(log_s);
     return (s_t - p->s0) / p->s0;
@@ -152,13 +195,14 @@ int heston_run(const HestonParams *p,
     double prev_es = 0.0;
     int    converged = 0;
     int    n_loss_5 = 0;
+    int    n_jumps  = 0;
 
     while (n_total < max_paths) {
         int batch = paths_per_batch;
         if (n_total + batch > max_paths) batch = max_paths - n_total;
 
         for (int i = 0; i < batch; i++) {
-            double r = simulate_one_path(p, &rng);
+            double r = simulate_one_path(p, &rng, &n_jumps);
             returns[n_total + i] = r;
             if (r < -0.05) n_loss_5++;
         }
@@ -199,12 +243,15 @@ int heston_run(const HestonParams *p,
     /* Annualize: scale by sqrt(1/T). */
     double annualized_vol = horizon_vol * sqrt(1.0 / p->T);
 
-    out->expected_return = mean;
-    out->forward_vol     = annualized_vol;
-    out->es_95           = prev_es;
-    out->prob_loss_5     = (double)n_loss_5 / (double)n_total;
-    out->n_paths_used    = n_total;
-    out->converged       = converged;
+    out->expected_return    = mean;
+    out->forward_vol        = annualized_vol;
+    out->es_95              = prev_es;
+    out->prob_loss_5        = (double)n_loss_5 / (double)n_total;
+    out->n_paths_used       = n_total;
+    out->converged          = converged;
+    out->n_jumps_total      = n_jumps;
+    out->jump_contribution  = n_total > 0
+        ? (double)n_jumps / (double)n_total : 0.0;
 
     free(returns);
     return 0;
@@ -255,6 +302,12 @@ int heston_calibrate_from_history(const OHLCBar *bars, int n_bars,
     out->rho     = -0.7;
     out->T       = horizon_years;
     out->steps   = steps;
+    /* Bates jump defaults — off by default. News/options layer bumps
+     * lam later; leaving lam=0 preserves pure-Heston behaviour for
+     * every caller that hasn't opted in yet. */
+    out->lam     = 0.0;
+    out->mu_j    = -0.02;
+    out->sigma_j = 0.05;
 
     free(log_ret);
     return 0;
@@ -280,6 +333,13 @@ static void simulate_path_record(const HestonParams *p, Rng *rng,
     double sqrt_dt = sqrt(dt);
     double rho_comp = sqrt(1.0 - p->rho * p->rho);
 
+    int    jumps_on = (p->lam > 0.0);
+    double lam_dt   = jumps_on ? p->lam * dt : 0.0;
+    double k_jump   = jumps_on
+        ? (exp(p->mu_j + 0.5 * p->sigma_j * p->sigma_j) - 1.0)
+        : 0.0;
+    double drift_adj = jumps_on ? (-p->lam * k_jump * dt) : 0.0;
+
     double v     = p->v0;
     double log_s = log(p->s0);
     out_prices[0] = p->s0;
@@ -292,9 +352,19 @@ static void simulate_path_record(const HestonParams *p, Rng *rng,
         double v_pos = v > 0.0 ? v : 0.0;
         double sqrt_v = sqrt(v_pos);
 
-        log_s += (p->mu - 0.5 * v_pos) * dt + sqrt_v * sqrt_dt * z1;
+        log_s += (p->mu - 0.5 * v_pos) * dt + sqrt_v * sqrt_dt * z1 + drift_adj;
         v     += p->kappa * (p->theta - v_pos) * dt
                  + p->sigma_v * sqrt_v * sqrt_dt * z2;
+
+        if (jumps_on) {
+            int n_j = rng_poisson(rng, lam_dt);
+            if (n_j > 0) {
+                double jump_sum = 0.0;
+                for (int j = 0; j < n_j; j++)
+                    jump_sum += p->mu_j + p->sigma_j * rng_normal(rng);
+                log_s += jump_sum;
+            }
+        }
 
         out_prices[i + 1] = exp(log_s);
     }
@@ -324,14 +394,17 @@ int heston_path_bundle(const HestonParams *p, int n_paths,
     double hi      = p->s0 * exp( k_sd * sigma_h);
     if (hi <= lo)  { lo = p->s0 * 0.7; hi = p->s0 * 1.3; }
 
-    out->n_steps   = n_steps;
-    out->n_buckets = n_buckets;
-    out->price_min = lo;
-    out->price_max = hi;
-    out->s0        = p->s0;
-    out->T         = p->T;
-    out->density   = NULL;
+    out->n_steps        = n_steps;
+    out->n_buckets      = n_buckets;
+    out->price_min      = lo;
+    out->price_max      = hi;
+    out->s0             = p->s0;
+    out->T              = p->T;
+    out->density        = NULL;
     out->p05 = out->p50 = out->p95 = NULL;
+    out->sample_paths   = NULL;
+    out->sample_class   = NULL;
+    out->n_sample_paths = 0;
 
     int    *density = calloc((size_t)n_buckets * (size_t)n_cols, sizeof(int));
     double *p05     = calloc((size_t)n_cols,                       sizeof(double));
@@ -413,10 +486,56 @@ int heston_path_bundle(const HestonParams *p, int n_paths,
     out->expected_return = mean;
     out->n_paths_used    = n_paths;
 
+    /* ── Subsampled sample paths for the spaghetti overlay ────────
+     * Stride-sample up to MAX_SAMPLE_PATHS paths, extract from the
+     * column-major prices_all buffer, and classify each by its terminal
+     * outcome against the terminal p05/p95 quantiles. */
+    enum { MAX_SAMPLE_PATHS = 200 };
+    int max_sample = n_paths < MAX_SAMPLE_PATHS ? n_paths : MAX_SAMPLE_PATHS;
+    int stride     = n_paths / max_sample;
+    if (stride < 1) stride = 1;
+
+    double *sample_paths = malloc((size_t)max_sample * (size_t)n_cols * sizeof(double));
+    int    *sample_class = malloc((size_t)max_sample * sizeof(int));
+    if (sample_paths && sample_class) {
+        double p05_T = p05[n_steps];
+        double p95_T = p95[n_steps];
+        int n_sample = 0;
+        for (int i = 0; i < n_paths && n_sample < max_sample; i += stride) {
+            for (int s = 0; s < n_cols; s++) {
+                sample_paths[(size_t)n_sample * (size_t)n_cols + s] =
+                    prices_all[(size_t)s * (size_t)n_paths + (size_t)i];
+            }
+            double s_T = sample_paths[(size_t)n_sample * (size_t)n_cols + n_steps];
+            sample_class[n_sample] = s_T < p05_T ? 0
+                                    : s_T > p95_T ? 2
+                                    : 1;
+            n_sample++;
+        }
+        out->sample_paths   = sample_paths;
+        out->sample_class   = sample_class;
+        out->n_sample_paths = n_sample;
+    } else {
+        free(sample_paths);
+        free(sample_class);
+        out->n_sample_paths = 0;
+    }
+
     free(path);
     free(col_buf);
     free(terms);
     free(prices_all);
+    return 0;
+}
+
+int heston_simulate_price_path(const HestonParams *p,
+                               uint64_t seed,
+                               double *path_out) {
+    if (!p || !path_out) return -1;
+    if (p->s0 <= 0.0 || p->T <= 0.0 || p->steps <= 0) return -1;
+    Rng rng;
+    rng_init(&rng, seed ? seed : 0xA17EB00B0FFEC0DEULL);
+    simulate_path_record(p, &rng, path_out);
     return 0;
 }
 
@@ -426,6 +545,9 @@ void heston_path_bundle_free(HestonPathBundle *b) {
     free(b->p05);     b->p05     = NULL;
     free(b->p50);     b->p50     = NULL;
     free(b->p95);     b->p95     = NULL;
+    free(b->sample_paths); b->sample_paths = NULL;
+    free(b->sample_class); b->sample_class = NULL;
+    b->n_sample_paths = 0;
     b->n_steps = 0;
     b->n_buckets = 0;
 }

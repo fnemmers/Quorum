@@ -46,16 +46,13 @@ SRCS = src/main.c            \
        src/ipc_server.c      \
        src/ipc_research.c    \
        src/db.c              \
-       src/bot_picks.c       \
-       src/aggregation.c     \
-       src/backtest.c        \
-       src/convergence.c     \
        src/sp500_universe.c  \
        src/crawler.c         \
        src/heston.c          \
        src/heston_surface.c  \
-       src/risk_score.c      \
-       src/rebalance.c       \
+       src/news_jump.c       \
+       src/bates_backtest.c  \
+       src/option_score.c    \
        src/cJSON.c
 
 OBJS = $(SRCS:.c=.o)

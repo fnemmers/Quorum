@@ -298,30 +298,6 @@ static void parse_quote(cJSON *ev) {
         sym->valuestring, price, bid, ask,
         (long long)vol, (long long)ts);
     broadcast(msg);
-
-    /* check alerts */
-    pthread_mutex_lock(&g_state.lock);
-    for (int i = 0; i < g_state.alert_count; i++) {
-        AlertRecord *a = &g_state.alerts[i];
-        if (!a->active) continue;
-        if (strcmp(a->symbol, sym->valuestring) != 0) continue;
-        int fired = (a->type == ALERT_ABOVE && price >= a->trigger_price) ||
-                    (a->type == ALERT_BELOW && price <= a->trigger_price);
-        if (fired) {
-            char alert_msg[512];
-            snprintf(alert_msg, sizeof(alert_msg),
-                "{\"type\":\"alert\",\"id\":%d,\"symbol\":\"%s\","
-                "\"condition\":\"%s\",\"trigger\":%.4f,\"price\":%.4f}\n",
-                a->id, a->symbol,
-                a->type == ALERT_ABOVE ? "above" : "below",
-                a->trigger_price, price);
-            pthread_mutex_unlock(&g_state.lock);
-            broadcast(alert_msg);
-            pthread_mutex_lock(&g_state.lock);
-            a->active = 0;  /* one-shot alert */
-        }
-    }
-    pthread_mutex_unlock(&g_state.lock);
 }
 
 /* Process one complete Polygon.io message (may be array of events) */

@@ -1,9 +1,7 @@
 import { useStore } from '../store/useStore';
 
 export default function StatusBar() {
-  const { bridgeConnected, killSwitch, symbol, setSymbol } = useStore();
-
-  const symbols = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'TSLA', 'SPY'];
+  const { bridgeConnected } = useStore();
 
   return (
     <div className="flex items-center justify-between px-4 py-2 bg-grey border-b border-border text-sm">
@@ -15,25 +13,8 @@ export default function StatusBar() {
             {bridgeConnected ? 'LIVE' : 'OFFLINE'}
           </span>
         </div>
+        <span className="text-subtle text-xs">Bates + AI-Jump Diffusion</span>
       </div>
-
-      <div className="flex items-center gap-2">
-        <span className="text-subtle text-xs">SYMBOL</span>
-        <select
-          value={symbol}
-          onChange={(e) => setSymbol(e.target.value)}
-          className="bg-surface border border-border text-ink text-sm px-2 py-1 rounded focus:outline-none focus:border-accent"
-        >
-          {symbols.map((s) => (
-            <option key={s} value={s}>{s}</option>
-          ))}
-        </select>
-      </div>
-
-      {killSwitch && (
-        <div className="text-bear font-bold animate-pulse">⚠ KILL SWITCH ACTIVE</div>
-      )}
-
       <div className="text-subtle text-xs">
         {new Date().toLocaleTimeString()}
       </div>

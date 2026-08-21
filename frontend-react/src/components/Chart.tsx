@@ -18,13 +18,24 @@ function toChartBar(b: OHLCBar): CandlestickData {
   };
 }
 
-export default function Chart() {
+interface ChartProps {
+  /* Optional override — if omitted, falls back to the selected symbol
+   * (or the legacy global `symbol` for standalone use). */
+  symbol?: string;
+  /* Compact header — for the Tick Evaluation slot alongside MC/Vol. */
+  compact?: boolean;
+}
+
+export default function Chart({ symbol: propSymbol, compact }: ChartProps = {}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef     = useRef<IChartApi | null>(null);
   const seriesRef    = useRef<ISeriesApi<'Candlestick'> | null>(null);
 
-  const { bars, symbol, quotes } = useStore();
-  const quote = quotes[symbol];
+  const { barsBySymbol, selectedSymbol, quotes } = useStore();
+
+  const symbol = propSymbol ?? selectedSymbol ?? undefined;
+  const bars   = symbol ? (barsBySymbol[symbol] ?? []) : [];
+  const quote  = symbol ? quotes[symbol] : undefined;
 
   /* Create chart once */
   useEffect(() => {
@@ -72,15 +83,19 @@ export default function Chart() {
     };
   }, []);
 
-  /* Update data */
+  /* Update data whenever the resolved symbol's bars change */
   useEffect(() => {
-    if (!seriesRef.current || bars.length === 0) return;
+    if (!seriesRef.current) return;
+    if (bars.length === 0) {
+      seriesRef.current.setData([]);
+      return;
+    }
     const sorted = [...bars].sort((a, b) => a.t - b.t);
     seriesRef.current.setData(sorted.map(toChartBar));
     chartRef.current?.timeScale().fitContent();
   }, [bars]);
 
-  /* Real-time tick update */
+  /* Real-time tick update — folds the latest quote into the last bar */
   useEffect(() => {
     if (!seriesRef.current || !quote) return;
     const last = bars[bars.length - 1];
@@ -92,32 +107,73 @@ export default function Chart() {
       low:   Math.min(last.l,  quote.price),
       close: quote.price,
     });
-  }, [quote]);
+  }, [quote, bars]);
 
   const pct = quote && bars.length
     ? ((quote.price - bars[0].o) / bars[0].o * 100).toFixed(2)
     : null;
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="flex items-baseline gap-3 px-3 py-2 border-b border-border">
-        <span className="text-ink font-bold text-lg">{symbol}</span>
-        {quote && (
+    <div className="flex flex-col h-full bg-panel border border-border rounded overflow-hidden">
+      <div className={`flex items-baseline gap-3 border-b border-border ${
+        compact ? 'px-3 py-1.5' : 'px-3 py-2'
+      }`}>
+        {compact ? (
           <>
-            <span className="text-ink text-2xl font-mono">${quote.price.toFixed(2)}</span>
-            {pct !== null && (
-              <span className={parseFloat(pct) >= 0 ? 'text-bull' : 'text-bear'}>
-                {parseFloat(pct) >= 0 ? '+' : ''}{pct}% YTD
+            <span className="text-xs text-subtle uppercase tracking-widest font-bold">
+              Candlestick
+            </span>
+            {symbol && (
+              <span className="text-accent text-xs font-mono">· {symbol}</span>
+            )}
+            {quote && (
+              <span className="text-ink text-xs font-mono ml-auto">
+                ${quote.price.toFixed(2)}
+                {pct !== null && (
+                  <span className={parseFloat(pct) >= 0 ? 'text-bull ml-2' : 'text-bear ml-2'}>
+                    {parseFloat(pct) >= 0 ? '+' : ''}{pct}%
+                  </span>
+                )}
               </span>
             )}
-            <span className="text-subtle text-xs ml-auto">
-              Bid {quote.bid.toFixed(2)} · Ask {quote.ask.toFixed(2)}
-            </span>
+          </>
+        ) : (
+          <>
+            <span className="text-ink font-bold text-lg">{symbol ?? '—'}</span>
+            {quote && (
+              <>
+                <span className="text-ink text-2xl font-mono">${quote.price.toFixed(2)}</span>
+                {pct !== null && (
+                  <span className={parseFloat(pct) >= 0 ? 'text-bull' : 'text-bear'}>
+                    {parseFloat(pct) >= 0 ? '+' : ''}{pct}% YTD
+                  </span>
+                )}
+                <span className="text-subtle text-xs ml-auto">
+                  Bid {quote.bid.toFixed(2)} · Ask {quote.ask.toFixed(2)}
+                </span>
+              </>
+            )}
+            {!quote && <span className="text-subtle text-sm">Awaiting quote…</span>}
           </>
         )}
-        {!quote && <span className="text-subtle text-sm">Awaiting quote…</span>}
       </div>
-      <div ref={containerRef} className="flex-1" />
+      <div className="relative">
+        <div
+          ref={containerRef}
+          className="block w-full"
+          style={{ height: 260, background: '#0a0e12' }}
+        />
+        {!symbol && (
+          <div className="absolute inset-0 flex items-center justify-center text-xs italic text-subtle">
+            Click a symbol to load its candlestick.
+          </div>
+        )}
+        {symbol && bars.length === 0 && (
+          <div className="absolute inset-0 flex items-center justify-center text-xs italic text-subtle">
+            Loading history…
+          </div>
+        )}
+      </div>
     </div>
   );
 }

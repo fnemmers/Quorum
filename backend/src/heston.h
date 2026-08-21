@@ -5,19 +5,27 @@
 #include <stdint.h>
 
 /*
- * heston  -  Heston stochastic-volatility Monte Carlo per stock.
+ * heston  -  Heston stochastic-volatility Monte Carlo per stock,
+ *            with an optional Merton-style jump-diffusion overlay
+ *            (Bates 1996) driven by (lam, mu_j, sigma_j). Set lam=0
+ *            to recover pure Heston.
  *
- * Model (Heston 1993), under real-world measure:
- *     dS_t = mu * S_t dt + sqrt(v_t) * S_t dW1
+ * Model (Heston 1993 + Bates jumps), under a chosen measure:
+ *     dS_t = (mu - lam*k) * S_t dt + sqrt(v_t) * S_t dW1 + (J-1) S_t dN
  *     dv_t = kappa (theta - v_t) dt + sigma_v * sqrt(v_t) dW2
  *     <dW1, dW2> = rho dt
+ *     N_t ~ Poisson(lam),  ln J ~ Normal(mu_j, sigma_j^2)
+ *     k    = E[J-1] = exp(mu_j + 0.5*sigma_j^2) - 1     (compensator)
  *
- * Discretization: log-Euler on S, full-truncation on v.
+ * Discretization: log-Euler on S with per-step Poisson jump draw,
+ *                 full-truncation on v.
  *     v_{t+dt} = v_t + kappa (theta - max(v_t,0)) dt
  *                  + sigma_v sqrt(max(v_t,0)) sqrt(dt) Z2
- *     ln S_{t+dt} = ln S_t + (mu - 0.5 * max(v_t,0)) dt
+ *     ln S_{t+dt} = ln S_t + (mu - lam*k - 0.5 * max(v_t,0)) dt
  *                  + sqrt(max(v_t,0)) sqrt(dt) Z1
+ *                  + sum_{i=1..N_step} (mu_j + sigma_j * Zi)
  *     Z2 = rho Z1 + sqrt(1 - rho^2) eps
+ *     N_step ~ Poisson(lam * dt)
  *
  * Output is a single forward-looking risk profile per stock that the
  * blended ranking layer consumes. Per stock the function runs paths in
@@ -36,6 +44,10 @@ typedef struct {
     double rho;         /* correlation of price/vol Brownians         */
     double T;           /* horizon in years (e.g. 21/252 for 3w)     */
     int    steps;       /* discretization steps over the horizon     */
+    /* Bates jump component. lam == 0 collapses back to pure Heston. */
+    double lam;         /* Poisson intensity, jumps per year         */
+    double mu_j;        /* mean of ln(1+J), the log-jump             */
+    double sigma_j;     /* stdev of ln(1+J)                          */
 } HestonParams;
 
 typedef struct {
@@ -46,6 +58,9 @@ typedef struct {
     double prob_loss_5;       /* P(return < -5%)                        */
     int    n_paths_used;
     int    converged;         /* 1 if ES_95 stabilized before max_paths */
+    /* Bates diagnostics. Both zero when lam == 0. */
+    int    n_jumps_total;     /* total Poisson jumps summed over paths  */
+    double jump_contribution; /* n_jumps_total / n_paths_used            */
 } HestonScore;
 
 /*
@@ -128,6 +143,16 @@ typedef struct {
     double *p50;
     double *p95;
 
+    /* Subsampled sample paths for the spaghetti overlay.
+     * Row-major: sample_paths[i * (n_steps + 1) + step] = price on
+     * sample i at time step. n_sample_paths ≤ min(n_paths, 200).
+     * Also emit the terminal-quantile classification so the frontend
+     * can colour the path (0 = tail below p05, 1 = middle, 2 = above
+     * p95). */
+    double *sample_paths;
+    int    *sample_class;      /* length n_sample_paths */
+    int     n_sample_paths;
+
     /* Distribution-level summary for the dashboard. */
     double  es_95;            /* expected shortfall of terminal returns      */
     double  expected_return;
@@ -148,6 +173,21 @@ int heston_path_bundle(const HestonParams *p, int n_paths,
 
 /* Frees the heap members of *b (density, p05/p50/p95) and zeros them. */
 void heston_path_bundle_free(HestonPathBundle *b);
+
+/*
+ * Simulate one Bates/Heston price path from t=0 to t=T.
+ * `path_out` must hold (p->steps + 1) doubles; path_out[0] = spot,
+ * path_out[i] = price at step i * (T / steps).
+ * Returns 0 on success, -1 on bad inputs.
+ *
+ * Uses the same Log-Euler + full-truncation + Poisson-jump scheme as
+ * heston_run(). Exposes what was previously the file-static
+ * simulate_path_record() so the Bates backtest can rehedge along a
+ * bundle of forward paths.
+ */
+int heston_simulate_price_path(const HestonParams *p,
+                               uint64_t seed,
+                               double *path_out);
 
 /* ── Layer-1 calibration diagnostics ──────────────────────────── */
 /*

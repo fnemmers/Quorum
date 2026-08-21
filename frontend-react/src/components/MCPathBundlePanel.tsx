@@ -98,8 +98,8 @@ function drawBundle(canvas: HTMLCanvasElement, b: PathBundle) {
   const cellW = d.plotW / (nCols - 1);
   const cellH = d.plotH / nBuckets;
 
-  // ── Density heatmap ────────────────────────────────
-  // Compress brightness with sqrt so the medium-density cells are visible.
+  // ── Density heatmap (faded, so spaghetti overlays read clearly) ─
+  ctx.globalAlpha = 0.35;
   for (let row = 0; row < nBuckets; row++) {
     const yTop = d.padT + (1 - (row + 1) / nBuckets) * d.plotH;
     const r = b.density[row];
@@ -112,6 +112,38 @@ function drawBundle(canvas: HTMLCanvasElement, b: PathBundle) {
       ctx.fillStyle = `rgb(${rr},${gg},${bb})`;
       ctx.fillRect(xL, yTop, cellW + 1, cellH + 1);
     }
+  }
+  ctx.globalAlpha = 1.0;
+
+  // ── Spaghetti overlay: subsampled paths coloured by terminal ────
+  // Draw tail-walk paths LAST so they sit on top of the middle bulk.
+  const sampleN = b.n_sample_paths ?? 0;
+  if (sampleN > 0 && b.sample_paths && b.sample_class) {
+    const drawOrder = [1, 2, 0]; // middle → upside → tail (tail on top)
+    for (const cls of drawOrder) {
+      let stroke: string;
+      let width: number;
+      let alpha: number;
+      if (cls === 0)      { stroke = '#ff4444'; width = 1.1; alpha = 0.75; }
+      else if (cls === 2) { stroke = '#3fd664'; width = 0.9; alpha = 0.45; }
+      else                { stroke = '#8b949e'; width = 0.6; alpha = 0.20; }
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth   = width;
+      ctx.globalAlpha = alpha;
+      for (let i = 0; i < sampleN; i++) {
+        if (b.sample_class[i] !== cls) continue;
+        const path = b.sample_paths[i];
+        if (!path || path.length === 0) continue;
+        ctx.beginPath();
+        for (let s = 0; s < path.length; s++) {
+          const x = xAt(s);
+          const y = yAt(path[s]);
+          if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1.0;
   }
 
   // ── Spot reference line ─────────────────────────────
@@ -188,9 +220,9 @@ function drawBundle(canvas: HTMLCanvasElement, b: PathBundle) {
     ctx!.fillText(label, legX + 20, legY);
     legY += 13;
   }
-  legendItem('#ff5050', 'p05 (tail)', true);
-  legendItem('#5da9ff', 'p50',        false);
-  legendItem('#5dff8a', 'p95',        true);
+  legendItem('#ff4444', 'tail walks', false);
+  legendItem('#5da9ff', 'p50 median', false);
+  legendItem('#5dff8a', 'p95 band',   true);
 }
 
 /* ── Component ───────────────────────────────────────── */

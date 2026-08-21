@@ -4,17 +4,18 @@
 #include <stdint.h>
 #include <pthread.h>
 
-/* Bumped from 64 to accommodate the S&P 500 universe used by the bot
- * ensemble. The MarketState arrays sized by MAX_SYMBOLS now allocate
- * ~6 MB for the price-history ring buffers — fine on a desktop. If this
- * becomes a problem, move the ring buffers to a heap allocation indexed
- * by symbol id, or shrink PRICE_HISTORY. */
+/*
+ * Bumped from 64 to accommodate the S&P 500 universe used by the Bates
+ * option-ranking layer. If MAX_SYMBOLS × PRICE_HISTORY memory grows
+ * problematic, move the ring buffers to a heap allocation indexed by
+ * symbol id, or shrink PRICE_HISTORY.
+ */
 #define MAX_SYMBOLS     600
 #define MAX_SYMBOL_LEN  16
 #define PRICE_HISTORY   1000   /* ring-buffer size per symbol */
 #define MAX_CLIENTS     16
 
-/* ── A single OHLCV bar (candlestick) ──────────────────────────────── */
+/* ── A single OHLCV bar (candlestick) ─────────────────────────────── */
 typedef struct {
     int64_t  timestamp;   /* Unix ms */
     double   open;
@@ -24,7 +25,7 @@ typedef struct {
     int64_t  volume;
 } OHLCBar;
 
-/* ── Latest quote for one symbol ─────────────────────────────────────  */
+/* ── Latest quote for one symbol ──────────────────────────────────── */
 typedef struct {
     char     symbol[MAX_SYMBOL_LEN];
     double   price;
@@ -35,29 +36,7 @@ typedef struct {
     int      valid;       /* 1 = has data */
 } Quote;
 
-/* ── Alert record ────────────────────────────────────────────────────  */
-typedef enum { ALERT_ABOVE, ALERT_BELOW } AlertType;
-
-typedef struct {
-    int        id;
-    char       symbol[MAX_SYMBOL_LEN];
-    AlertType  type;
-    double     trigger_price;
-    int        active;
-} AlertRecord;
-
-#define MAX_ALERTS 256
-
-/* ── Portfolio holding ───────────────────────────────────────────────  */
-typedef struct {
-    char   symbol[MAX_SYMBOL_LEN];
-    double shares;
-    double avg_price;
-} Holding;
-
-#define MAX_HOLDINGS 64
-
-/* ── Shared state (protected by mutex) ───────────────────────────────  */
+/* ── Shared state (protected by mutex) ────────────────────────────── */
 typedef struct {
     pthread_mutex_t lock;
 
@@ -72,15 +51,6 @@ typedef struct {
     double   price_history[MAX_SYMBOLS][PRICE_HISTORY];
     int      price_head[MAX_SYMBOLS];
     int      price_count[MAX_SYMBOLS];
-
-    /* alerts */
-    AlertRecord alerts[MAX_ALERTS];
-    int         alert_count;
-    int         next_alert_id;
-
-    /* portfolio */
-    Holding  holdings[MAX_HOLDINGS];
-    int      holding_count;
 
     /* IPC client sockets (so we can broadcast updates) */
     int      client_fds[MAX_CLIENTS];
@@ -102,13 +72,5 @@ int  market_get_or_add_symbol(const char *symbol);
 void market_update_quote(const char *symbol, double price,
                          double bid, double ask,
                          int64_t volume, int64_t ts);
-
-/* Portfolio helpers */
-void market_portfolio_add(const char *symbol, double shares, double price);
-void market_portfolio_remove(const char *symbol);
-
-/* Alert helpers */
-int  market_alert_add(const char *symbol, AlertType type, double trigger);
-void market_alert_remove(int id);
 
 #endif /* MARKET_DATA_H */

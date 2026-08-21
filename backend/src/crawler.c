@@ -88,7 +88,7 @@ static int64_t parse_iso8601_ms(const char *s) {
     if (!s) return 0;
     int year, month, day, hour, min, sec;
     if (sscanf(s, "%d-%d-%dT%d:%d:%d", &year, &month, &day,
-               &hour, &min, &sec) < 6)
+        &hour, &min, &sec) < 6)
         return 0;
 
     struct tm tmv = {0};
@@ -238,7 +238,7 @@ int crawler_fetch_news(int limit, const char *cutoff_date) {
         }
 
         if (store_article(aid, title, desc, pub_name, aurl,
-                          tickers_csv, pub_ms) == 0)
+                        tickers_csv, pub_ms) == 0)
             stored++;
     }
 

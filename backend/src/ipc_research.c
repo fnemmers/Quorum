@@ -17,6 +17,7 @@
 #include "bates_backtest.h"
 #include "option_score.h"
 #include "polygon_rest.h"
+#include "portfolio.h"
 #include "db.h"
 #include "cJSON.h"
 
@@ -833,6 +834,80 @@ static void cmd_option_ranking_blend(int fd, cJSON *root) {
     free_symbols(syms, n_syms);
 }
 
+/* ── Portfolio (paper trading + live holdings) ─────────────────── */
+
+static void cmd_paper_state(int fd) {
+    cJSON *o = cJSON_CreateObject();
+    if (portfolio_paper_state(o) != 0) {
+        cJSON_Delete(o);
+        send_error(fd, "paper_state: query failed");
+        return;
+    }
+    send_obj(fd, o);
+    cJSON_Delete(o);
+}
+
+static void cmd_paper_order(int fd, cJSON *root) {
+    cJSON *jsym  = cJSON_GetObjectItemCaseSensitive(root, "symbol");
+    cJSON *jside = cJSON_GetObjectItemCaseSensitive(root, "side");
+    cJSON *jqty  = cJSON_GetObjectItemCaseSensitive(root, "qty");
+    if (!jsym || !cJSON_IsString(jsym) ||
+        !jside || !cJSON_IsString(jside) ||
+        !jqty  || !cJSON_IsNumber(jqty)) {
+        send_error(fd, "paper_order: need symbol, side, qty");
+        return;
+    }
+    char err[128] = {0};
+    int rc = portfolio_paper_order(jsym->valuestring, jside->valuestring,
+                                   jqty->valuedouble, err, sizeof(err));
+    if (rc != 0) {
+        char full[192];
+        snprintf(full, sizeof(full), "paper_order: %s", err[0] ? err : "failed");
+        send_error(fd, full);
+        return;
+    }
+    cmd_paper_state(fd);
+}
+
+static void cmd_paper_reset(int fd) {
+    if (portfolio_paper_reset() != 0) {
+        send_error(fd, "paper_reset: failed");
+        return;
+    }
+    cmd_paper_state(fd);
+}
+
+static void cmd_live_holdings(int fd) {
+    cJSON *o = cJSON_CreateObject();
+    if (portfolio_live_state(o) != 0) {
+        cJSON_Delete(o);
+        send_error(fd, "live_holdings: query failed");
+        return;
+    }
+    send_obj(fd, o);
+    cJSON_Delete(o);
+}
+
+static void cmd_live_holdings_set(int fd, cJSON *root) {
+    cJSON *jsym = cJSON_GetObjectItemCaseSensitive(root, "symbol");
+    cJSON *jqty = cJSON_GetObjectItemCaseSensitive(root, "qty");
+    cJSON *javg = cJSON_GetObjectItemCaseSensitive(root, "avg_cost");
+    cJSON *jnt  = cJSON_GetObjectItemCaseSensitive(root, "notes");
+    if (!jsym || !cJSON_IsString(jsym) ||
+        !jqty || !cJSON_IsNumber(jqty) ||
+        !javg || !cJSON_IsNumber(javg)) {
+        send_error(fd, "live_holdings_set: need symbol, qty, avg_cost");
+        return;
+    }
+    const char *notes = (jnt && cJSON_IsString(jnt)) ? jnt->valuestring : "";
+    if (portfolio_live_upsert(jsym->valuestring, jqty->valuedouble,
+                              javg->valuedouble, notes) != 0) {
+        send_error(fd, "live_holdings_set: failed");
+        return;
+    }
+    cmd_live_holdings(fd);
+}
+
 /* ── Public dispatch ────────────────────────────────────────────── */
 
 void ipc_research_init(void)    { /* no-op */ }
@@ -849,5 +924,10 @@ int ipc_research_dispatch(int client_fd, const char *cmd, cJSON *root) {
     else if (!strcmp(cmd, "heston_diagnostics"))   { cmd_heston_diagnostics(client_fd, root);   return 1; }
     else if (!strcmp(cmd, "bates_backtest_run"))   { cmd_bates_backtest_run(client_fd, root);   return 1; }
     else if (!strcmp(cmd, "option_ranking_blend")) { cmd_option_ranking_blend(client_fd, root); return 1; }
+    else if (!strcmp(cmd, "paper_state"))          { cmd_paper_state(client_fd);                return 1; }
+    else if (!strcmp(cmd, "paper_order"))          { cmd_paper_order(client_fd, root);          return 1; }
+    else if (!strcmp(cmd, "paper_reset"))          { cmd_paper_reset(client_fd);                return 1; }
+    else if (!strcmp(cmd, "live_holdings"))        { cmd_live_holdings(client_fd);              return 1; }
+    else if (!strcmp(cmd, "live_holdings_set"))    { cmd_live_holdings_set(client_fd, root);    return 1; }
     return 0;
 }

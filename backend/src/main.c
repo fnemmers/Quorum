@@ -19,6 +19,7 @@
 #include "polygon_rest.h"
 #include "crawler.h"
 #include "db.h"
+#include "portfolio.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,6 +84,10 @@ int main(int argc, char *argv[]) {
 
     crawler_init(api_key);
     ipc_research_init();
+
+    /* Paper trading + live holdings tables. Seeds paper cash to $1M on
+     * first boot only; subsequent boots preserve whatever cash is left. */
+    portfolio_init(1000000.0);
 
     if (ipc_server_start() != 0) {
         fprintf(stderr, "[MAIN] Failed to start IPC server\n");

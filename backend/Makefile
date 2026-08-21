@@ -53,6 +53,7 @@ SRCS = src/main.c            \
        src/news_jump.c       \
        src/bates_backtest.c  \
        src/option_score.c    \
+       src/portfolio.c       \
        src/cJSON.c
 
 OBJS = $(SRCS:.c=.o)

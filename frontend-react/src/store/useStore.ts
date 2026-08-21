@@ -175,6 +175,64 @@ export interface OptionRankingResult {
   ranked: OptionRankedRow[];
 }
 
+/* ── Paper / Live portfolio types ─────────────────────────────── */
+
+export interface PaperPosition {
+  symbol: string;
+  qty: number;
+  avg_cost: number;
+  last_price: number;
+  has_price: boolean;
+  market_value: number;
+  unrealized_pnl: number;
+  unrealized_pct: number;
+  updated_at: number;
+}
+
+export interface PaperOrder {
+  id: number;
+  symbol: string;
+  side: 'buy' | 'sell';
+  qty: number;
+  fill_price: number;
+  cash_delta: number;
+  created_at: number;
+}
+
+export interface PaperState {
+  cash: number;
+  initial_cash: number;
+  positions_value: number;
+  equity: number;
+  unrealized_pnl: number;
+  total_pnl: number;
+  total_return_pct: number;
+  positions: PaperPosition[];
+  orders: PaperOrder[];
+}
+
+export interface LiveHolding {
+  symbol: string;
+  qty: number;
+  avg_cost: number;
+  notes: string;
+  last_price: number;
+  has_price: boolean;
+  cost_basis: number;
+  market_value: number;
+  unrealized_pnl: number;
+  unrealized_pct: number;
+  updated_at: number;
+}
+
+export interface LiveHoldingsState {
+  holdings: LiveHolding[];
+  total_cost: number;
+  total_value: number;
+  unrealized_pnl: number;
+  unrealized_pct: number;
+}
+
 /* ── Store ─────────────────────────────────────────────────────── */
 
 interface State {
@@ -202,6 +260,11 @@ interface State {
   batesBacktest: BatesBacktestResult | null;
   optionRanking: OptionRankingResult | null;
 
+  /* Portfolio slices. */
+  paperState:      PaperState      | null;
+  liveHoldings:    LiveHoldingsState | null;
+  paperError:      string | null;
+
   /* Busy flags. */
   pathBundleBusy:        boolean;
   volSurfaceBusy:        boolean;
@@ -209,6 +272,8 @@ interface State {
   newsJumpBusy:          boolean;
   batesBacktestBusy:     boolean;
   optionRankingBusy:     boolean;
+  paperBusy:             boolean;
+  liveHoldingsBusy:      boolean;
 
   _ws: WebSocket | null;
 
@@ -257,6 +322,15 @@ interface State {
     wConvex?: number;
     minUniverse?: number;
   }) => void;
+
+  /* Paper trading. */
+  refreshPaper: () => void;
+  paperOrder:   (symbol: string, side: 'buy' | 'sell', qty: number) => void;
+  paperReset:   () => void;
+
+  /* Live holdings (read-only book). */
+  refreshLiveHoldings: () => void;
+  liveHoldingsSet: (symbol: string, qty: number, avgCost: number, notes?: string) => void;
 }
 
 const WS_URL = 'ws://localhost:3001';
@@ -388,8 +462,38 @@ function connect(
       return;
     }
 
+    if (type === 'paper_state') {
+      const p: PaperState = {
+        cash:             msg.cash             as number,
+        initial_cash:     msg.initial_cash     as number,
+        positions_value:  msg.positions_value  as number,
+        equity:           msg.equity           as number,
+        unrealized_pnl:   msg.unrealized_pnl   as number,
+        total_pnl:        msg.total_pnl        as number,
+        total_return_pct: msg.total_return_pct as number,
+        positions:        (msg.positions as PaperPosition[]) ?? [],
+        orders:           (msg.orders    as PaperOrder[])    ?? [],
+      };
+      set({ paperState: p, paperBusy: false, paperError: null });
+      return;
+    }
+
+    if (type === 'live_holdings') {
+      const l: LiveHoldingsState = {
+        holdings:       (msg.holdings as LiveHolding[]) ?? [],
+        total_cost:     msg.total_cost     as number,
+        total_value:    msg.total_value    as number,
+        unrealized_pnl: msg.unrealized_pnl as number,
+        unrealized_pct: msg.unrealized_pct as number,
+      };
+      set({ liveHoldings: l, liveHoldingsBusy: false });
+      return;
+    }
+
     if (type === 'error') {
-      console.error('[backend]', msg.message);
+      const em = (msg.message as string) ?? '';
+      if (em.startsWith('paper_')) set({ paperBusy: false, paperError: em });
+      console.error('[backend]', em);
       return;
     }
   };
@@ -417,12 +521,18 @@ export const useStore = create<State>((set, get) => {
     batesBacktest: null,
     optionRanking: null,
 
+    paperState:      null,
+    liveHoldings:    null,
+    paperError:      null,
+
     pathBundleBusy:        false,
     volSurfaceBusy:        false,
     hestonDiagnosticsBusy: false,
     newsJumpBusy:          false,
     batesBacktestBusy:     false,
     optionRankingBusy:     false,
+    paperBusy:             false,
+    liveHoldingsBusy:      false,
 
     _ws: null,
 
@@ -533,6 +643,41 @@ export const useStore = create<State>((set, get) => {
         w_news:          opts.wNews         ?? 0.27,
         w_convex:        opts.wConvex       ?? 0.13,
         min_universe:    opts.minUniverse   ?? 8,
+      });
+    },
+
+    refreshPaper: () => {
+      set({ paperBusy: true });
+      get().send({ cmd: 'paper_state' });
+    },
+
+    paperOrder: (symbol, side, qty) => {
+      if (!symbol || !(qty > 0)) return;
+      set({ paperBusy: true, paperError: null });
+      get().send({
+        cmd: 'paper_order',
+        symbol: symbol.trim().toUpperCase(),
+        side, qty,
+      });
+    },
+
+    paperReset: () => {
+      set({ paperBusy: true, paperError: null });
+      get().send({ cmd: 'paper_reset' });
+    },
+
+    refreshLiveHoldings: () => {
+      set({ liveHoldingsBusy: true });
+      get().send({ cmd: 'live_holdings' });
+    },
+
+    liveHoldingsSet: (symbol, qty, avgCost, notes = '') => {
+      if (!symbol) return;
+      set({ liveHoldingsBusy: true });
+      get().send({
+        cmd: 'live_holdings_set',
+        symbol: symbol.trim().toUpperCase(),
+        qty, avg_cost: avgCost, notes,
       });
     },
   };
